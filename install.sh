@@ -3,7 +3,7 @@
 # =========================================================
 # 模块 0：全局配置与字典 (Configuration & Dictionary)
 # =========================================================
-readonly SCRIPT_VERSION="V12.10 绝对无痕零日志版"
+readonly SCRIPT_VERSION="V12.11 Let's Encrypt 纯正原血版"
 readonly LOG_FILE="/dev/null"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"
@@ -125,7 +125,8 @@ module_issue_cert() {
         /root/.acme.sh/acme.sh --upgrade --auto-upgrade "$AUTO_UPGRADE" 2>&1 | tee -a "$LOG_FILE"
         /root/.acme.sh/acme.sh --install-cronjob 2>&1 | tee -a "$LOG_FILE"
         
-        /root/.acme.sh/acme.sh --issue --dns $api -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE 2>&1 | tee -a "$LOG_FILE"
+        # 【唯一改动点】：末尾植入 --server letsencrypt 强行锁死 CA 机构
+        /root/.acme.sh/acme.sh --issue --dns $api -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE --server letsencrypt 2>&1 | tee -a "$LOG_FILE"
         
         /root/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
             --key-file /etc/nginx/ssl/${domain}_ecc.key \

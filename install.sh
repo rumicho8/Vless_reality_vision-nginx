@@ -3,7 +3,7 @@
 # =========================================================
 # 模块 0：全局配置与字典 (Configuration & Dictionary)
 # =========================================================
-readonly SCRIPT_VERSION="V12.11 Let's Encrypt 纯正原血版"
+readonly SCRIPT_VERSION="V12.15 绝对零侧漏版"
 readonly LOG_FILE="/dev/null"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"
@@ -125,7 +125,6 @@ module_issue_cert() {
         /root/.acme.sh/acme.sh --upgrade --auto-upgrade "$AUTO_UPGRADE" 2>&1 | tee -a "$LOG_FILE"
         /root/.acme.sh/acme.sh --install-cronjob 2>&1 | tee -a "$LOG_FILE"
         
-        # 【唯一改动点】：末尾植入 --server letsencrypt 强行锁死 CA 机构
         /root/.acme.sh/acme.sh --issue --dns $api -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE --server letsencrypt 2>&1 | tee -a "$LOG_FILE"
         
         /root/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
@@ -258,6 +257,12 @@ module_config_xray() {
     cat > "$XRAY_CONFIG" <<EOF
 {
   "log": { "loglevel": "warning" },
+  "dns": {
+    "servers": [
+      { "address": "https://1.1.1.1/dns-query" },
+      { "address": "https://dns.google/dns-query", "skipFallback": true }
+    ]
+  },
   "inbounds": [{
     "port": 443, "protocol": "vless",
     "settings": { "clients": [ { "id": "$UUID", "flow": "xtls-rprx-vision" } ], "decryption": "none" },
@@ -270,7 +275,10 @@ module_config_xray() {
       "alpn": ["h2", "http/1.1"]
     }
   }],
-  "outbounds": [{ "protocol": "freedom", "tag": "direct" }, { "protocol": "blackhole", "tag": "block" }],
+  "outbounds": [
+    { "protocol": "freedom", "tag": "direct", "settings": { "domainStrategy": "UseIP" } },
+    { "protocol": "blackhole", "tag": "block" }
+  ],
   "routing": {
     "domainStrategy": "IPIfNonMatch",
     "rules": [
@@ -338,7 +346,7 @@ module_cleanup() {
 module_show_result() {
     local domain=$1
     clear
-    log_ok "部署/更新圆满完成！(已开启全链路零日志模式)"
+    log_ok "部署/更新圆满完成！(已开启全链路绝对防泄漏模式)"
     
     if [[ "$GLOBAL_CERT_MODE" != "" ]]; then
         echo -e "\e[33m================================================\e[0m"

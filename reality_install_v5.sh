@@ -297,4 +297,242 @@ module_config_xray() {
     local domain=$1
     log_info "正在进行身份鉴权与持久化处理..."
     
-    if [[ -f "$XRAY_
+    if [[ -f "$XRAY_CONFIG" ]]; then
+        UUID=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONFIG" 2>/dev/null)
+        PRIV=$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' "$XRAY_CONFIG" 2>/dev/null)
+        SID=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0]' "$XRAY_CONFIG" 2>/dev/null)
+        [[ -n "$PRIV" && "$PRIV" != "null" ]] && PUB=$($XRAY_BIN x25519 -i "$PRIV" | grep -Ei "Public|Password" | awk '{print $NF}')
+    fi
+    
+    [[ -z "$UUID" || "$UUID" == "null" ]] && UUID=$(uuidgen)
+    [[ -z "$SID" || "$SID" == "null" ]] && SID=$(openssl rand -hex 8)
+    if [[ -z "$PRIV" || "$PRIV" == "null" ]]; then
+        local key_re=$($XRAY_BIN x25519)
+        PRIV=$(echo "$key_re" | grep -Ei "Private" | awk '{print $NF}')
+        PUB=$(echo "$key_re" | grep -Ei "Public|Password" | awk '{print $NF}')
+    fi
+
+    log_info "写入 Xray Reality 策略配置文件..."
+    mkdir -p "$XRAY_CONF_DIR"
+    
+    cat > "$XRAY_CONFIG" <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [{
+    "port": $GLOBAL_PORT, "protocol": "vless",
+    "settings": { "clients": [ { "id": "$UUID", "flow": "xtls-rprx-vision" } ], "decryption": "none" },
+    "streamSettings": {
+      "network": "tcp", "security": "reality",
+      "realitySettings": {
+        "show": false, "dest": "127.0.0.1:8443", "xver": 0, "fingerprint": "chrome",
+        "serverNames": ["$domain", "www.$domain"], "privateKey": "$PRIV", "shortIds": ["$SID"]
+      },
+      "alpn": ["h2", "http/1.1"]
+    }
+  }],
+  "outbounds": [{ "protocol": "freedom", "tag": "direct" }, { "protocol": "blackhole", "tag": "block" }],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      { "type": "field", "ip": ["geoip:cn", "geoip:private"], "outboundTag": "block" },
+      { "type": "field", "domain": ["geosite:category-ads-all", "geosite:cn"], "outboundTag": "block" }
+    ]
+  }
+}
+EOF
+    systemctl enable xray >> "$LOG_FILE" 2>&1
+    log_ok "Xray Reality 核心策略写入完毕"
+}
+
+# =========================================================
+# 模块 7：路由规则与自动化任务 (Routing & Automation)
+# =========================================================
+module_setup_automation() {
+    log_info "配置路由规则原子更新机制与定时任务调度..."
+    mkdir -p "$XRAY_SHARE_DIR" "$SCRIPT_DIR"
+    
+    cat > "$SCRIPT_DIR/update-dat.sh" <<EOF
+#!/bin/bash
+SHARE_DIR="$XRAY_SHARE_DIR"
+update_f() {
+    local f=\$1; local u=\$2
+    if curl -fL -o "\$SHARE_DIR/\${f}.new" "\$u" && [[ -s "\$SHARE_DIR/\${f}.new" ]]; then
+        mv -f "\$SHARE_DIR/\${f}.new" "\$SHARE_DIR/\$f"; return 0
+    fi
+    rm -f "\$SHARE_DIR/\${f}.new"; return 1
+}
+update_f "geoip.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+update_f "geosite.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+systemctl restart xray >/dev/null 2>&1
+EOF
+    chmod +x "$SCRIPT_DIR/update-dat.sh"
+    
+    echo -e "\e[36m-------------------- 路由库同步 --------------------\e[0m"
+    bash "$SCRIPT_DIR/update-dat.sh" 2>&1 | tee -a "$LOG_FILE"
+    echo -e "\e[36m----------------------------------------------------\e[0m"
+    
+    (crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh --cron" ; 
+     echo "0 2 * * * \"/root/.acme.sh/acme.sh\" --cron --home \"/root/.acme.sh\" > /dev/null" ;
+     echo "0 3 * * 1 $SCRIPT_DIR/update-dat.sh > /dev/null 2>&1") | crontab -
+     
+    log_ok "自动化任务统筹完毕 (Acme 强制锁定 2:00，路由库锁定周一 3:00)。"
+    log_ok "Xray Reality 节点启动成功。"
+}
+
+# =========================================================
+# 模块 8：极致隐私防追踪防护 (Stealth Mode)
+# =========================================================
+module_setup_stealth() {
+    echo -e "\n\e[33m--- 极致隐私模式 (SSH 离场自毁陷阱) ---\e[0m"
+    echo -e "开启后，每次退出 SSH 窗口将自动物理清空：\n 1. 所有输入的历史命令\n 2. 所有的系统日志和 SSH 登录记录\n \e[31m警告：开启后系统将绝对无痕，但节点报错时将无法查看日志进行排错！\e[0m"
+    
+    read -rp "是否开启极致隐私模式？[y/N]: " enable_stealth
+    
+    case "${enable_stealth}" in
+        [yY][eE][sS]|[yY])
+            log_info "正在为系统注入 SSH 断开自动自毁陷阱..."
+
+            local TRAP_CODE="
+# === 极客无痕自毁陷阱 (V12.16 自动注入) ===
+cleanup_on_exit() {
+    history -c
+    rm -f \$HOME/.bash_history
+    sudo journalctl --rotate >/dev/null 2>&1
+    sudo journalctl --vacuum-time=1s >/dev/null 2>&1
+    [ -f /var/log/auth.log ] && sudo truncate -s 0 /var/log/auth.log >/dev/null 2>&1
+}
+trap cleanup_on_exit EXIT SIGHUP"
+
+            if ! grep -q "cleanup_on_exit" /root/.bashrc; then
+                echo "$TRAP_CODE" >> /root/.bashrc
+                log_ok "Root 账户自毁陷阱配置完成."
+            else
+                log_warn "Root 账户自毁陷阱已存在，跳过注入."
+            fi
+
+            if [ -d "/home/admin" ] && [ -f "/home/admin/.bashrc" ]; then
+                if ! grep -q "cleanup_on_exit" /home/admin/.bashrc; then
+                    echo "$TRAP_CODE" >> /home/admin/.bashrc
+                    chown admin:admin /home/admin/.bashrc
+                    log_ok "AWS Admin 账户自毁陷阱配置完成."
+                fi
+            fi
+            ;;
+        *)
+            log_info "已跳过极致隐私模式配置，保留常规日志以供排错."
+            ;;
+    esac
+}
+
+# =========================================================
+# 模块 9：系统清理与垃圾回收 (System Cleanup)
+# =========================================================
+module_cleanup() {
+    log_info "正在执行系统垃圾清理与安装缓存释放..."
+    echo -e "\e[36m-------------------- 缓存清理进度 --------------------\e[0m"
+    apt-get autoremove -y 2>&1 | tee -a "$LOG_FILE"
+    apt-get clean 2>&1 | tee -a "$LOG_FILE"
+    rm -rf /tmp/xray_build
+    echo -e "\e[36m------------------------------------------------------\e[0m"
+    log_ok "系统垃圾与缓存已彻底清空。"
+}
+
+# =========================================================
+# 模块 10：结果展示中心 (Presentation)
+# =========================================================
+module_show_result() {
+    local domain=$1
+    clear
+    log_ok "部署/更新圆满完成！(已开启全链路优化模式)"
+    
+    if [[ "$GLOBAL_CERT_MODE" == "--staging" ]]; then
+        echo -e "\e[33m================================================\e[0m"
+        echo -e "\e[33m ⚠️ 警告：当前使用的是 Staging 测试证书！ \e[0m"
+        echo -e "\e[33m 测试成功后，请使用卸载选项清理，并重新选择真实证书安装。\e[0m"
+        echo -e "\e[33m================================================\e[0m"
+    fi
+    
+    local vless_link="vless://${UUID}@${domain}:${GLOBAL_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${domain}&fp=chrome&pbk=${PUB}&sid=${SID}&type=tcp#Reality_${domain}"
+    
+    echo -e "------------------------------------------------"
+    echo -e " 监听端口   : \e[33m$GLOBAL_PORT\e[0m"
+    echo -e " UUID       : \e[33m$UUID\e[0m"
+    echo -e " Public Key : \e[33m$PUB\e[0m"
+    echo -e " Short ID   : \e[33m$SID\e[0m"
+    echo -e " 路由策略   : \e[36mIPIfNonMatch + 广告拦截\e[0m"
+    echo -e "------------------------------------------------"
+    echo -e "节点链接:\n\e[32m$vless_link\e[0m\n"
+    echo "$vless_link" | qrencode -t ansiutf8
+}
+
+# =========================================================
+# 主控调度引擎 (Main Controller)
+# =========================================================
+main_install() {
+    init_log
+    module_prepare_env
+    module_setup_bbr
+    module_get_inputs
+    
+    module_issue_cert "$GLOBAL_DOMAIN" "$GLOBAL_DNS_API"
+    module_config_nginx "$GLOBAL_DOMAIN"
+    module_install_xray_core
+    module_config_xray "$GLOBAL_DOMAIN"
+    module_setup_automation
+    
+    module_setup_stealth
+    
+    module_cleanup
+    module_show_result "$GLOBAL_DOMAIN"
+}
+
+# =========================================================
+# 交互式菜单入口 (Interactive Menu)
+# =========================================================
+while true; do
+    clear
+    echo -e "\e[36m   Xray Reality 工业级管理工具 ($SCRIPT_VERSION)\e[0m"
+    echo "------------------------------------------------"
+    echo "1. 安装 / 无损覆盖更新"
+    echo "2. 彻底卸载与清理"
+    echo "3. 证书与定时任务自检"
+    echo "4. 查看部署底层日志"
+    echo "0. 退出"
+    read -p "请选择数字 [0-4]: " OPT
+    
+    case $OPT in
+        1) main_install ; break ;;
+        2)
+            echo -e "\n\e[34m[INFO]\e[0m 开始执行外科手术级卸载..."
+            systemctl stop xray nginx >/dev/null 2>&1
+            systemctl disable xray >/dev/null 2>&1
+            rm -f /etc/systemd/system/xray.service
+            rm -f /usr/local/bin/xray
+            systemctl daemon-reload
+            rm -f /etc/nginx/sites-available/xray
+            rm -f /etc/nginx/sites-enabled/xray
+            rm -rf "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh
+            crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh" | crontab -
+            
+            sed -i '/# === 极客无痕自毁陷阱/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
+            [[ -f /home/admin/.bashrc ]] && sed -i '/# === 极客无痕自毁陷阱/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null
+            
+            echo -e "\e[32m[OK] 系统已彻底卸载清理，且已拔除历史记录清理脚本。\e[0m"
+            read -p "按回车键返回..." ;;
+        3)
+            echo -e "\n\e[36m--- 定时任务列表 ---\e[0m"
+            crontab -l | grep -E "acme.sh|update-dat.sh"
+            echo -e "\n\e[36m--- 证书续期服务状态 ---\e[0m"
+            [[ -f "/root/.acme.sh/acme.sh" ]] && /root/.acme.sh/acme.sh --cron --home "/root/.acme.sh"
+            read -p "按回车键返回..." ;;
+        4)
+            if [[ -f "$LOG_FILE" ]]; then
+                tail -n 30 "$LOG_FILE"
+            else
+                echo "暂无日志文件 ($LOG_FILE)"
+            fi
+            read -p "按回车键返回..." ;;
+        0) echo "退出脚本。"; exit 0 ;;
+        *) echo "输入无效！" ; sleep 1 ;;
+    esac
+done

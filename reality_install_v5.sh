@@ -3,7 +3,7 @@
 # =========================================================
 # 模块 0：全局配置与字典 (Configuration & Dictionary)
 # =========================================================
-readonly SCRIPT_VERSION="v12.17 (自定义端口 + 极致隐私版 + 续期防死锁)"
+readonly SCRIPT_VERSION="v12.19 (基于v12.17原版修复: 防穿透+防假死)"
 readonly LOG_FILE="/dev/null"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"
@@ -38,6 +38,11 @@ log_err()  { echo -e "\e[31m[ERROR]\e[0m $1" | tee -a "$LOG_FILE"; exit 1; }
 init_log() {
     > "$LOG_FILE"
     echo "=== Xray Reality Installation Log ($(date)) ===" >> "$LOG_FILE"
+}
+
+# 【仅新增】：清空输入缓冲区的工具，防止多余回车穿透
+flush_stdin() {
+    while read -r -t 0.1 -u 0; do :; done 2>/dev/null
 }
 
 # =========================================================
@@ -84,10 +89,12 @@ module_setup_bbr() {
 # 模块 3：交互与参数获取 (Interactive Inputs)
 # =========================================================
 module_get_inputs() {
-    read -p "请输入解析到本机的域名: " GLOBAL_DOMAIN
+    flush_stdin
+    read -rp "请输入解析到本机的域名: " GLOBAL_DOMAIN < /dev/tty
     
     echo -e "\n\e[36m正在检测域名解析状态...\e[0m"
-    local local_ip=$(curl -s4 icanhazip.com 2>/dev/null || curl -s4 ifconfig.me 2>/dev/null)
+    # 【仅修改】：加上了 --connect-timeout 2 -m 3 防止查IP时脚本假死
+    local local_ip=$(curl -s4 --connect-timeout 2 -m 3 icanhazip.com 2>/dev/null || curl -s4 --connect-timeout 2 -m 3 ifconfig.me 2>/dev/null)
     local domain_ip=$(getent ahosts "$GLOBAL_DOMAIN" | awk '{ print $1 }' | head -1)
     
     echo -e "本机公网 IP : \e[33m${local_ip:-"未获取到"}\e[0m"
@@ -100,7 +107,8 @@ module_get_inputs() {
     fi
     echo ""
 
-    read -p "请输入 Xray 监听端口 (1-65535) [默认 443]: " PORT_INPUT
+    flush_stdin
+    read -rp "请输入 Xray 监听端口 (1-65535) [默认 443]: " PORT_INPUT < /dev/tty
     GLOBAL_PORT=${PORT_INPUT:-443}
     if [[ "$GLOBAL_PORT" == "80" || "$GLOBAL_PORT" == "8443" ]]; then
         log_warn "端口 $GLOBAL_PORT 与 Nginx 内部组件冲突，已自动回退到默认端口 443"
@@ -113,22 +121,27 @@ module_get_inputs() {
 
     echo -e "1) DNS API 模式 (推荐，需提供 Key，支持通配符证书)"
     echo -e "2) HTTP 独立模式 (免 Key，要求域名必须准确解析到本机)"
-    read -p "选择验证模式 [1/2, 默认1]: " VERIFY_TYPE
+    flush_stdin
+    read -rp "选择验证模式 [1/2, 默认1]: " VERIFY_TYPE < /dev/tty
     
     if [[ "$VERIFY_TYPE" == "2" ]]; then
         GLOBAL_DNS_API="standalone"
     else
         echo -e "\n1) Cloudflare\n2) Namesilo"
-        read -p "选择 DNS API 提供商 [1/2]: " DNS_TYPE
+        flush_stdin
+        read -rp "选择 DNS API 提供商 [1/2]: " DNS_TYPE < /dev/tty
         if [[ "$DNS_TYPE" == "1" ]]; then
             GLOBAL_DNS_API="dns_cf"
-            read -p "请输入 CF_Token: " GLOBAL_CF_TOKEN
-            read -p "请输入 CF_Zone_ID: " GLOBAL_CF_ZONE_ID
+            flush_stdin
+            read -rp "请输入 CF_Token: " GLOBAL_CF_TOKEN < /dev/tty
+            flush_stdin
+            read -rp "请输入 CF_Zone_ID: " GLOBAL_CF_ZONE_ID < /dev/tty
             export CF_Token=$GLOBAL_CF_TOKEN
             export CF_Zone_ID=$GLOBAL_CF_ZONE_ID
         else
             GLOBAL_DNS_API="dns_namesilo"
-            read -p "请输入 Namesilo_Key: " GLOBAL_NAMESILO_KEY
+            flush_stdin
+            read -rp "请输入 Namesilo_Key: " GLOBAL_NAMESILO_KEY < /dev/tty
             export Namesilo_Key=$GLOBAL_NAMESILO_KEY
         fi
     fi
@@ -136,7 +149,8 @@ module_get_inputs() {
     echo -e "\n\e[33m--- 证书模式选择 ---\e[0m"
     echo -e "1) 真实生产证书 (正常使用，有申请频率限制)"
     echo -e "2) 测试伪证书 (Staging 环境，无频率限制，仅用于测试脚本是否跑通)"
-    read -p "请选择证书模式 [1/2, 默认1]: " CERT_MODE_INPUT
+    flush_stdin
+    read -rp "请选择证书模式 [1/2, 默认1]: " CERT_MODE_INPUT < /dev/tty
     
     if [[ "$CERT_MODE_INPUT" == "2" ]]; then
         GLOBAL_CERT_MODE="--staging"
@@ -153,7 +167,8 @@ module_get_inputs() {
 module_issue_cert() {
     local domain=$1
     local api=$2
-    if [[ ! -f "/etc/nginx/ssl/${domain}_ecc.cer" ]]; then
+    # 【仅修改】：将 -f 改为 -s，防止 0 字节错误证书导致无法启动
+    if [[ ! -s "/etc/nginx/ssl/${domain}_ecc.cer" ]]; then
         log_info "启动 Acme.sh 申请 ECC 证书 ($domain)..."
         echo -e "\e[36m------------------- 证书申请进度 -------------------\e[0m"
         curl -s https://get.acme.sh | sh -s email=admin@$domain 2>&1 | tee -a "$LOG_FILE"
@@ -162,14 +177,12 @@ module_issue_cert() {
         
         if [[ "$api" == "standalone" ]]; then
             systemctl stop nginx >/dev/null 2>&1
-            # 【V12.17 修复】：注入前后置钩子，根治独立模式 60 天后自动续期的端口死锁
             /root/.acme.sh/acme.sh --issue -d "$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE \
                 --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx" 2>&1 | tee -a "$LOG_FILE"
         else
             /root/.acme.sh/acme.sh --issue --dns $api -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE 2>&1 | tee -a "$LOG_FILE"
         fi
         
-        # 【V12.17 优化】：续期时同步重启 nginx 和 xray，确保证书缓存双端刷新生效
         /root/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
             --key-file /etc/nginx/ssl/${domain}_ecc.key \
             --fullchain-file /etc/nginx/ssl/${domain}_ecc.cer \
@@ -386,7 +399,8 @@ module_setup_stealth() {
     echo -e "\n\e[33m--- 极致隐私模式 (SSH 离场自毁陷阱) ---\e[0m"
     echo -e "开启后，每次退出 SSH 窗口将自动物理清空：\n 1. 所有输入的历史命令\n 2. 所有的系统日志和 SSH 登录记录\n \e[31m警告：开启后系统将绝对无痕，但节点报错时将无法查看日志进行排错！\e[0m"
     
-    read -rp "是否开启极致隐私模式？[y/N]: " enable_stealth
+    flush_stdin
+    read -rp "是否开启极致隐私模式？[y/N]: " enable_stealth < /dev/tty
     
     case "${enable_stealth}" in
         [yY][eE][sS]|[yY])
@@ -498,7 +512,9 @@ while true; do
     echo "3. 证书与定时任务自检"
     echo "4. 查看部署底层日志"
     echo "0. 退出"
-    read -p "请选择数字 [0-4]: " OPT
+    
+    flush_stdin
+    read -rp "请选择数字 [0-4]: " OPT < /dev/tty
     
     case $OPT in
         1) main_install ; break ;;

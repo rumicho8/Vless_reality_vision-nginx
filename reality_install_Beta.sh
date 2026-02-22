@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # =========================================================
-# 模块 0：全局配置与字典 (Configuration & Dictionary)
+# 模块 0：全局配置与核心变量 (Global Configuration)
 # =========================================================
-readonly SCRIPT_VERSION="v12.24 (双模式架构: 闭环回落 + 纯净无域名 + 终极版)"
+readonly SCRIPT_VERSION="Beta1.0"
 readonly LOG_FILE="/dev/null"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"
@@ -95,6 +95,7 @@ module_get_inputs() {
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
         read -p "请输入解析到本机的域名: " GLOBAL_DOMAIN
         
+        # [配置优化]: 自动剥离 www 前缀以规范化域名解析参数
         GLOBAL_DOMAIN=$(echo "$GLOBAL_DOMAIN" | sed 's/^www\.//g')
         
         echo -e "\n\e[36m正在检测域名解析状态...\e[0m"
@@ -151,6 +152,7 @@ module_get_inputs() {
         fi
 
     else
+        # [架构分支]: 纯净无域名模式专属环境参数获取
         echo -e "\n\e[36m--- 无域名模式配置 ---\e[0m"
         echo -e "推荐使用连通性好的大厂域名，如: www.microsoft.com, gateway.icloud.com, www.yahoo.com"
         read -p "请输入用于伪装的公共 SNI 域名 [默认 www.microsoft.com]: " PUBLIC_SNI_INPUT
@@ -264,7 +266,7 @@ EOF
         echo "System Ready" > /var/www/html/index.html
     fi
 
-    # 【新增逻辑】：确保无论卸载时是否被禁用，重新安装都会强制夺回 Nginx 开机自启权
+    # [服务守护]: 强制覆写 Nginx 开机自启状态，以防前置卸载导致状态丢失
     systemctl enable nginx >/dev/null 2>&1
     systemctl restart nginx || log_err "Nginx 启动失败，请检查端口被占情况。"
     log_ok "Web 防护与前置代理就绪 (已清除默认站点冲突)。"
@@ -395,6 +397,7 @@ EOF
     bash "$SCRIPT_DIR/update-dat.sh" 2>&1 | tee -a "$LOG_FILE"
     echo -e "\e[36m----------------------------------------------------\e[0m"
     
+    # [任务调度]: 修复 Crontab 任务冗余问题，并根据架构模式动态下发证书续期任务
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
         (crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh" ; 
          echo "0 2 * * * \"/root/.acme.sh/acme.sh\" --cron --home \"/root/.acme.sh\" > /dev/null" ;
@@ -422,7 +425,7 @@ module_setup_stealth() {
         [yY][eE][sS]|[yY])
             log_info "正在为系统注入 SSH 断开自动自毁陷阱..."
             local TRAP_CODE="
-# === 极客无痕自毁陷阱 (V12.16 自动注入) ===
+# === 系统级安全无痕审计防护 (自动注入) ===
 cleanup_on_exit() {
     history -c
     rm -f \$HOME/.bash_history
@@ -549,7 +552,7 @@ while true; do
         2)
             echo -e "\n\e[34m[INFO]\e[0m 开始执行外科手术级卸载..."
             systemctl stop xray nginx >/dev/null 2>&1
-            # 【修复 1】：彻底禁用 Xray 和 Nginx 开机自启
+            # [服务清理]: 彻底禁用核心与前置服务的开机自启机制
             systemctl disable xray nginx >/dev/null 2>&1
             rm -f /etc/systemd/system/xray.service
             rm -f /usr/local/bin/xray
@@ -557,14 +560,14 @@ while true; do
             
             rm -f /etc/nginx/sites-available/xray
             rm -f /etc/nginx/sites-enabled/xray
-            # 【修复 2】：物理清空伪装站网页源码
+            # [存储清理]: 物理抹除前端伪装站点的静态资源
             rm -rf /var/www/html/*
             
             rm -rf "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh
             crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh" | crontab -
             
-            sed -i '/# === 极客无痕自毁陷阱/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
-            [[ -f /home/admin/.bashrc ]] && sed -i '/# === 极客无痕自毁陷阱/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null
+            sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
+            [[ -f /home/admin/.bashrc ]] && sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null
             
             echo -e "\e[32m[OK] 系统已彻底卸载清理，且已拔除历史记录与伪装站源码。\e[0m"
             read -p "按回车键返回..." ;;

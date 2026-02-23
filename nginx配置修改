@@ -210,17 +210,17 @@ worker_processes auto;
 pid /run/nginx.pid;
 error_log /var/log/nginx/error.log notice;
 include /etc/nginx/modules-enabled/*.conf;
-events { worker_connections 1024; use epoll; }
+events { worker_connections 1024; }
 http {
-	sendfile on;
-	tcp_nopush on;
-	types_hash_max_size 2048;
-    server_tokens off;
-	include /etc/nginx/mime.types;
-	default_type application/octet-stream;
-	ssl_protocols TLSv1.2 TLSv1.3;
-	ssl_prefer_server_ciphers on;
-	ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+  sendfile on;
+  tcp_nopush on;
+  types_hash_max_size 2048;
+  server_tokens off;
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers on;
+  ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
   ssl_ecdh_curve X25519:prime256v1;
   ssl_session_cache shared:SSL:10m;
   ssl_session_timeout 10m;
@@ -229,10 +229,10 @@ http {
   ssl_stapling_verify on;
   resolver 8.8.8.8 1.1.1.1 valid=300s;
   resolver_timeout 5s;
-	access_log off;
-	gzip on;
-	include /etc/nginx/conf.d/*.conf;
-	include /etc/nginx/sites-enabled/*;
+  access_log off;
+  gzip on;
+  include /etc/nginx/conf.d/*.conf;
+  include /etc/nginx/sites-enabled/*;
 }
 EOF
 
@@ -357,21 +357,36 @@ module_config_xray() {
 {
   "log": { "loglevel": "warning" },
   "inbounds": [{
-    "port": $GLOBAL_PORT, "protocol": "vless",
+    "port": $GLOBAL_PORT,
+    "protocol": "vless",
     "settings": { "clients": [ { "id": "$UUID", "flow": "xtls-rprx-vision" } ], "decryption": "none" },
+    "sniffing": {
+      "enabled": true,
+      "destOverride": ["http", "tls"],
+      "routeOnly": true
+    },
     "streamSettings": {
-      "network": "tcp", "security": "reality",
+      "network": "tcp",
+      "security": "reality",
       "realitySettings": {
-        "show": false, "dest": "$dest_addr", "xver": 0, "fingerprint": "chrome",
-        "serverNames": $server_names_json, "privateKey": "$PRIV", "shortIds": ["$SID"]
+        "show": false,
+        "dest": "$dest_addr",
+        "xver": 0,
+        "serverNames": $server_names_json,
+        "privateKey": "$PRIV",
+        "shortIds": ["$SID"]
       },
       "alpn": ["h2", "http/1.1"]
     }
   }],
-  "outbounds": [{ "protocol": "freedom", "tag": "direct" }, { "protocol": "blackhole", "tag": "block" }],
+  "outbounds": [
+    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "blackhole", "tag": "block" }
+  ],
   "routing": {
     "domainStrategy": "IPIfNonMatch",
     "rules": [
+      { "type": "field", "protocol": ["bittorrent"], "outboundTag": "block" },
       { "type": "field", "ip": ["geoip:cn", "geoip:private"], "outboundTag": "block" },
       { "type": "field", "domain": ["geosite:category-ads-all", "geosite:cn"], "outboundTag": "block" }
     ]

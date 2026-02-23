@@ -243,6 +243,7 @@ server {
     listen 127.0.0.1:8443 ssl http2;
     ssl_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
+    ssl_trusted_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     server_name $domain www.$domain;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff;

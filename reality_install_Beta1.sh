@@ -100,8 +100,13 @@ module_get_inputs() {
         
         echo -e "\n\e[36m正在检测域名解析状态...\e[0m"
         local local_ip=$(curl -s4 icanhazip.com 2>/dev/null || curl -s4 ifconfig.me 2>/dev/null)
-        local domain_ip=$(getent ahosts "$GLOBAL_DOMAIN" | awk '{ print $1 }' | head -1)
-        
+        local cf_api="https://cloudflare-dns.com/dns-query"
+        local g_api="https://dns.google/resolve"
+        local domain_ip=$(curl -sm 5 -H "accept: application/dns-json" "${cf_api}?name=$GLOBAL_DOMAIN&type=A" 2>/dev/null | jq -r 'if .Answer then [.Answer[] | select(.type == 1) | .data][0] else empty end')
+        if [[ -z "$domain_ip" ]]; then
+            domain_ip=$(curl -sm 5 -H "accept: application/dns-json" "${g_api}?name=$GLOBAL_DOMAIN&type=A" 2>/dev/null | jq -r 'if .Answer then [.Answer[] | select(.type == 1) | .data][0] else empty end')
+        fi
+        domain_ip=$(echo "$domain_ip" | tr -d '[:space:]')
         echo -e "本机公网 IP : \e[33m${local_ip:-"未获取到"}\e[0m"
         echo -e "域名解析 IP : \e[33m${domain_ip:-"未获取到解析"}\e[0m"
         
@@ -112,9 +117,18 @@ module_get_inputs() {
         fi
         echo ""
 
-        read -p "请输入 Xray 监听端口 (1-65535) [默认 443]: " PORT_INPUT
-        GLOBAL_PORT=${PORT_INPUT:-443}
-        echo -e "\e[32m[OK] 选定端口: $GLOBAL_PORT\e[0m\n"
+        # --- 修改部分：添加端口占用检测循环 ---
+        while true; do
+            read -p "请输入 Xray 监听端口 (1-65535) [默认 443]: " PORT_INPUT
+            GLOBAL_PORT=${PORT_INPUT:-443}
+            if lsof -i :"$GLOBAL_PORT" >/dev/null 2>&1; then
+                log_warn "端口 $GLOBAL_PORT 已被占用，请更换其他端口！"
+            else
+                log_ok "选定监听端口: $GLOBAL_PORT"
+                break
+            fi
+        done
+        echo ""
 
         echo -e "1) DNS API 模式 (推荐，需提供 Key，支持通配符证书)"
         echo -e "2) HTTP 独立模式 (免 Key，要求域名必须准确解析到本机)"
@@ -154,14 +168,23 @@ module_get_inputs() {
     else
         # [架构分支]: 纯净无域名模式专属环境参数获取
         echo -e "\n\e[36m--- 无域名模式配置 ---\e[0m"
-        echo -e "推荐使用连通性好的大厂域名，如: www.microsoft.com, gateway.icloud.com, www.yahoo.com"
-        read -p "请输入用于伪装的公共 SNI 域名 [默认 www.microsoft.com]: " PUBLIC_SNI_INPUT
-        GLOBAL_PUBLIC_SNI=${PUBLIC_SNI_INPUT:-"www.microsoft.com"}
+        echo -e "推荐使用连通性好的大厂域名，如: www.apple.com, gateway.icloud.com, www.yahoo.com"
+        read -p "请输入用于伪装的公共 SNI 域名 [默认 www.apple.com]: " PUBLIC_SNI_INPUT
+        GLOBAL_PUBLIC_SNI=${PUBLIC_SNI_INPUT:-"www.apple.com"}
         GLOBAL_PUBLIC_SNI=$(echo "$GLOBAL_PUBLIC_SNI" | sed 's/^https:\/\///g' | sed 's/\/$//g')
 
-        read -p "请输入 Xray 监听端口 (1-65535) [默认 443]: " PORT_INPUT
-        GLOBAL_PORT=${PORT_INPUT:-443}
-        echo -e "\e[32m[OK] 选定伪装域名: $GLOBAL_PUBLIC_SNI, 端口: $GLOBAL_PORT\e[0m\n"
+        # --- 修改部分：添加端口占用检测循环 ---
+        while true; do
+            read -p "请输入 Xray 监听端口 (1-65535) [默认 443]: " PORT_INPUT
+            GLOBAL_PORT=${PORT_INPUT:-443}
+            if lsof -i :"$GLOBAL_PORT" >/dev/null 2>&1; then
+                log_warn "端口 $GLOBAL_PORT 已被占用，请更换其他端口！"
+            else
+                log_ok "选定监听端口: $GLOBAL_PORT"
+                break
+            fi
+        done
+        echo ""
     fi
 }
 
@@ -381,9 +404,11 @@ module_config_xray() {
   "routing": {
     "domainStrategy": "IPIfNonMatch",
     "rules": [
+      { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" },
       { "type": "field", "protocol": ["bittorrent"], "outboundTag": "block" },
-      { "type": "field", "ip": ["geoip:cn", "geoip:private"], "outboundTag": "block" },
-      { "type": "field", "domain": ["geosite:category-ads-all", "geosite:cn"], "outboundTag": "block" }
+      { "type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block" },
+      { "type": "field", "domain": ["geosite:geolocation-cn"], "outboundTag": "block" },
+      { "type": "field", "ip": ["geoip:cn"], "outboundTag": "block" }
     ]
   }
 }
@@ -518,12 +543,12 @@ module_show_result() {
     local vless_link="vless://${UUID}@${client_addr}:${GLOBAL_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${client_sni}&fp=chrome&pbk=${PUB}&sid=${SID}&type=tcp#Reality_${client_sni}"
     
     echo -e "------------------------------------------------"
-    echo -e " 监听端口   : \e[33m$GLOBAL_PORT\e[0m"
-    echo -e " UUID       : \e[33m$UUID\e[0m"
+    echo -e " 监听端口    : \e[33m$GLOBAL_PORT\e[0m"
+    echo -e " UUID        : \e[33m$UUID\e[0m"
     echo -e " Public Key : \e[33m$PUB\e[0m"
-    echo -e " Short ID   : \e[33m$SID\e[0m"
-    echo -e " 伪装 SNI   : \e[36m$client_sni\e[0m"
-    echo -e " 路由策略   : \e[36mIPIfNonMatch + 广告拦截\e[0m"
+    echo -e " Short ID    : \e[33m$SID\e[0m"
+    echo -e " 伪装 SNI    : \e[36m$client_sni\e[0m"
+    echo -e " 路由策略    : \e[36mIPIfNonMatch + 广告拦截\e[0m"
     echo -e "------------------------------------------------"
     echo -e "节点链接:\n\e[32m$vless_link\e[0m\n"
     echo "$vless_link" | qrencode -t ansiutf8

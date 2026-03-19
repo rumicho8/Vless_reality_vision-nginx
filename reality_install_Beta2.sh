@@ -100,8 +100,13 @@ module_get_inputs() {
         
         echo -e "\n\e[36m正在检测域名解析状态...\e[0m"
         local local_ip=$(curl -s4 icanhazip.com 2>/dev/null || curl -s4 ifconfig.me 2>/dev/null)
-        local domain_ip=$(getent ahosts "$GLOBAL_DOMAIN" | awk '{ print $1 }' | head -1)
-        
+        local cf_api="https://cloudflare-dns.com/dns-query"
+        local g_api="https://dns.google/resolve"
+        local domain_ip=$(curl -sm 5 -H "accept: application/dns-json" "${cf_api}?name=$GLOBAL_DOMAIN&type=A" 2>/dev/null | jq -r 'if .Answer then [.Answer[] | select(.type == 1) | .data][0] else empty end')
+        if [[ -z "$domain_ip" ]]; then
+            domain_ip=$(curl -sm 5 -H "accept: application/dns-json" "${g_api}?name=$GLOBAL_DOMAIN&type=A" 2>/dev/null | jq -r 'if .Answer then [.Answer[] | select(.type == 1) | .data][0] else empty end')
+        fi
+        domain_ip=$(echo "$domain_ip" | tr -d '[:space:]')
         echo -e "本机公网 IP : \e[33m${local_ip:-"未获取到"}\e[0m"
         echo -e "域名解析 IP : \e[33m${domain_ip:-"未获取到解析"}\e[0m"
         

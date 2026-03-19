@@ -159,9 +159,9 @@ module_get_inputs() {
     else
         # [架构分支]: 纯净无域名模式专属环境参数获取
         echo -e "\n\e[36m--- 无域名模式配置 ---\e[0m"
-        echo -e "推荐使用连通性好的大厂域名，如: www.microsoft.com, gateway.icloud.com, www.yahoo.com"
-        read -p "请输入用于伪装的公共 SNI 域名 [默认 www.microsoft.com]: " PUBLIC_SNI_INPUT
-        GLOBAL_PUBLIC_SNI=${PUBLIC_SNI_INPUT:-"www.microsoft.com"}
+        echo -e "推荐使用连通性好的大厂域名，如: www.apple.com, gateway.icloud.com, www.yahoo.com"
+        read -p "请输入用于伪装的公共 SNI 域名 [默认 www.apple.com]: " PUBLIC_SNI_INPUT
+        GLOBAL_PUBLIC_SNI=${PUBLIC_SNI_INPUT:-"www.apple.com"}
         GLOBAL_PUBLIC_SNI=$(echo "$GLOBAL_PUBLIC_SNI" | sed 's/^https:\/\///g' | sed 's/\/$//g')
 
         read -p "请输入 Xray 监听端口 (1-65535) [默认 443]: " PORT_INPUT

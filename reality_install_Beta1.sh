@@ -559,6 +559,7 @@ module_show_result() {
 # =========================================================
 main_install() {
     init_log
+    systemctl stop xray nginx >/dev/null 2>&1
     module_prepare_env
     module_setup_bbr
     module_get_inputs

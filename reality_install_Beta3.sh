@@ -326,7 +326,7 @@ EOF
     rm -rf /var/www/html/*
     
     echo -e "${C_BLUE}------------------- 模板拉取进度 -------------------${C_RESET}"
-    if curl -fL -# --connect-timeout 10 -m 30 -o /tmp/web_template.zip "https://github.com/rumicho8/Nginx-3DCEList/archive/refs/heads/main.zip"; then
+    if curl -fL -# --connect-timeout 60 -o /tmp/web_template.zip "https://github.com/rumicho8/Nginx-3DCEList/archive/refs/heads/main.zip"; then
         echo -e "${C_BLUE}------------------- 模板解压进度 -------------------${C_RESET}"
         if unzip -o /tmp/web_template.zip -d /tmp/; then
             cp -r /tmp/Nginx-3DCEList-main/* /var/www/html/ 2>/dev/null || cp -r /tmp/*-main/* /var/www/html/ 2>/dev/null
@@ -340,7 +340,7 @@ EOF
     if [ ! -f "/var/www/html/index.html" ]; then
         log_warn "检测到站点目录依然为空或缺少首页，已强制注入底层防护页面！"
         mkdir -p /var/www/html
-        echo "<!DOCTYPE html><html><head><title>System Protection</title></head><body><h1 style='text-align:center;margin-top:20%;'>403 Forbidden - Internal Proxy Core</h1></body></html>" > /var/www/html/index.html
+        echo '<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>' > /var/www/html/index.html
     else
         log_ok "伪装站点静态资源部署成功。"
     fi

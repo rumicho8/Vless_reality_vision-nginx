@@ -351,7 +351,7 @@ EOF
 
             [[ -d "$inner_dir" ]] || log_err "模板目录解析失败"
 
-            cp -rf "$inner_dir"/* "$target_dir/" 2>/dev/null
+            cp -a "$inner_dir"/. "$target_dir/" 2>/dev/null
 
             log_ok "静态资源文件解压归位成功。"
         else
@@ -400,7 +400,7 @@ module_install_xray_core() {
        --retry 3 \
        --retry-delay 2 \
        -m 120 \
-       -o "xray.zip" "$zip_url"; then
+       -o "$zip_name" "$zip_url"; then
         log_ok "核心下载成功"
     else
         log_err "核心下载失败，请检查网络连通性"

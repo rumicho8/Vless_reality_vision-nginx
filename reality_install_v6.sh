@@ -22,7 +22,7 @@ fi
 # =========================================================
 # 模块 0：全局配置与核心变量
 # =========================================================
-readonly SCRIPT_VERSION="Pro Final V3"
+readonly SCRIPT_VERSION="Pro Final V7"
 readonly LOG_FILE="/dev/null"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"
@@ -182,7 +182,7 @@ module_get_inputs() {
         echo -e "推荐使用连通性好的大厂域名，如: www.apple.com, gateway.icloud.com, www.yahoo.com"
         read -rp "请输入用于伪装的公共 SNI 域名 [默认 www.apple.com]: " PUBLIC_SNI_INPUT
         GLOBAL_PUBLIC_SNI=${PUBLIC_SNI_INPUT:-"www.apple.com"}
-        GLOBAL_PUBLIC_SNI=$(echo "$GLOBAL_PUBLIC_SNI" | sed 's/^https:\/\///g' | sed 's/\/$//g' | tr -d '[:space:]')
+        GLOBAL_PUBLIC_SNI=$(echo "$GLOBAL_PUBLIC_SNI" | sed 's/^https:\/\///g' | sed 's/^http:\/\///g' | sed 's/\/$//g' | tr -d '[:space:]')
         get_listen_port
     fi
 }
@@ -351,7 +351,7 @@ EOF
 }
 
 # =========================================================
-# 模块 6：Xray 核心调度中心 (彻底恢复原版 API 解析逻辑)
+# 模块 6：Xray 核心调度中心
 # =========================================================
 module_install_xray_core() {
     log_info "正在拉取 Xray 稳定版核心程序..."
@@ -491,23 +491,25 @@ module_setup_automation() {
     log_info "配置路由规则原子更新机制与定时任务调度..."
     mkdir -p "$SCRIPT_DIR"
     
-    cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
+    cat > "$SCRIPT_DIR/update-dat.sh" <<EOF
 #!/bin/bash
-SHARE_DIR="/usr/local/share/xray"
+SHARE_DIR="$XRAY_SHARE_DIR"
 update_f() {
-    local f=$1; local u=$2
-    if curl -fLsm 30 -o "${SHARE_DIR}/${f}.new" "$u" && [[ -s "${SHARE_DIR}/${f}.new" ]]; then
-        mv -f "${SHARE_DIR}/${f}.new" "${SHARE_DIR}/${f}"
-    else
-        rm -f "${SHARE_DIR}/${f}.new"
+    local f=\$1; local u=\$2
+    if curl -fL -o "\$SHARE_DIR/\${f}.new" "\$u" && [[ -s "\$SHARE_DIR/\${f}.new" ]]; then
+        mv -f "\$SHARE_DIR/\${f}.new" "\$SHARE_DIR/\$f"; return 0
     fi
+    rm -f "\$SHARE_DIR/\${f}.new"; return 1
 }
 update_f "geoip.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 update_f "geosite.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 systemctl restart xray >/dev/null 2>&1
 EOF
     chmod +x "$SCRIPT_DIR/update-dat.sh"
-    bash "$SCRIPT_DIR/update-dat.sh" & 
+    
+    echo -e "\e[36m-------------------- 路由库同步 --------------------\e[0m"
+    bash "$SCRIPT_DIR/update-dat.sh" 2>&1 | tee -a "$LOG_FILE"
+    echo -e "\e[36m----------------------------------------------------\e[0m"
     
     local tmp_cron="/tmp/xray_cron"
     crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh" > "$tmp_cron"
@@ -540,9 +542,11 @@ cleanup_on_exit() {
     cd / >/dev/null 2>&1
     history -c
     rm -f \$HOME/.bash_history
-    sudo journalctl --rotate >/dev/null 2>&1
-    sudo journalctl --vacuum-time=1s >/dev/null 2>&1
-    [ -f /var/log/auth.log ] && sudo truncate -s 0 /var/log/auth.log >/dev/null 2>&1
+    local SUDO_CMD=\"\"
+    command -v sudo >/dev/null 2>&1 && SUDO_CMD=\"sudo\"
+    \$SUDO_CMD journalctl --rotate >/dev/null 2>&1
+    \$SUDO_CMD journalctl --vacuum-time=1s >/dev/null 2>&1
+    [ -f /var/log/auth.log ] && \$SUDO_CMD truncate -s 0 /var/log/auth.log >/dev/null 2>&1
 }
 trap cleanup_on_exit EXIT SIGHUP"
 

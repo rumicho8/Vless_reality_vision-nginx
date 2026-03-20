@@ -322,48 +322,55 @@ EOF
     fi
 
     log_info "正在从 GitHub 拉取高级伪装站模板..."
+
     local target_dir="/var/www/html"
     local temp_extract="/tmp/web_temp_$(date +%s)"
-    
+
     mkdir -p "$target_dir"
-    # 使用 :? 确保变量安全，防止 rm -rf /*
-    rm -rf "${target_dir:?}"/*
+
+    rm -rf "${target_dir:?}/"* "${target_dir:?}/".[!.]* "${target_dir:?}/"..?* 2>/dev/null
+
     echo -e "${C_BLUE}------------------- 模板拉取进度 -------------------${C_RESET}"
-    # 集成了3次重试 和 15秒超时
+
     if curl -fL -# \
-        --connect-timeout 15 \
+        --connect-timeout 10 \
+        --max-time 120 \
         --retry 3 \
         --retry-delay 2 \
-        -m 120 \
+        --retry-connrefused \
         -o /tmp/web_template.zip \
-        "https://github.com/rumicho8/Nginx-3DCEList/archive/refs/heads/main.zip"; then
-        
+        "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main"; then
+
         echo -e "${C_BLUE}------------------- 执行解压部署 -------------------${C_RESET}"
+
         mkdir -p "$temp_extract"
-        
-        # -q 静默解压，-o 覆盖
+
         if unzip -qo /tmp/web_template.zip -d "$temp_extract"; then
-            # 自动寻找解压出的第一层目录，将其下的内容移动到目标目录
-            # 这种写法不需要管文件夹叫 Nginx-3DCEList-main 还是别的什么
-            cp -rf "$temp_extract"/*/* "$target_dir/" 2>/dev/null
+
+            inner_dir=$(find "$temp_extract" -mindepth 1 -maxdepth 1 -type d | head -n1)
+
+            [[ -d "$inner_dir" ]] || log_err "模板目录解析失败"
+
+            cp -a "$inner_dir"/. "$target_dir/" 2>/dev/null
+
             log_ok "静态资源文件解压归位成功。"
         else
-            log_err "解压失败，请检查 unzip 依赖是否安装。"
+            log_err "解压失败，请检查 unzip 是否安装。"
         fi
-        
-        # 彻底清理临时目录
+
         rm -rf "$temp_extract" /tmp/web_template.zip 2>/dev/null
+
     else
-        echo -e "${C_RED}✖ 模板下载失败，即使重试 3 次后仍无法连接 GitHub。${C_RESET}"
+        echo -e "${C_RED}✖ 模板下载失败（重试3次仍失败）${C_RESET}"
     fi
+
     echo -e "${C_BLUE}----------------------------------------------------${C_RESET}"
 
-    # 最终防御：检测 index.html
-    if [[ ! -f "$target_dir/index.html" ]]; then
-        log_warn "检测到站点内容缺失，正在注入 403 应急防护页面..."
+    if [[ ! -s "$target_dir/index.html" ]]; then
+        log_warn "检测到站点内容缺失，注入 403 页面"
         echo '<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body style="background-color:black;color:white;text-align:center;padding-top:20%"><p>403 Forbidden</p><hr><p>nginx</p></body></html>' > "$target_dir/index.html"
     else
-        log_ok "伪装站点已上线。"
+        log_ok "伪装站点已上线"
     fi
 
     systemctl enable nginx >/dev/null 2>&1
@@ -393,7 +400,7 @@ module_install_xray_core() {
        --retry 3 \
        --retry-delay 2 \
        -m 120 \
-       -o "xray.zip" "$zip_url"; then
+       -o "$zip_name" "$zip_url"; then
         log_ok "核心下载成功"
     else
         log_err "核心下载失败，请检查网络连通性"

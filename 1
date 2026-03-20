@@ -414,16 +414,29 @@ module_config_xray() {
     if [[ -z "$PRIV" || "$PRIV" == "null" ]]; then
         local key_re="$($XRAY_BIN x25519)"
     
-        PRIV=$(sed -nE '/Private( key)?:/ { s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p; q; }' <<< "$key_re")
-        PUB=$(sed -nE '/(Public( key)?|Password):/ { s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p; q; }' <<< "$key_re")
-        
+        # 提取私钥：匹配到 Private 行后，s 命令提取其中的 43 位密钥为 \1
+        PRIV=$(sed -nE '/[Pp]rivate([[:space:]]*[Kk]ey)?:/ {
+            s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p
+            q
+        }' <<< "$key_re")
+
+        # 提取公钥/密码：匹配到相应行后，s 命令提取其中的 43 位密钥同样为 \1
+        PUB=$(sed -nE '/([Pp]ublic([[:space:]]*[Kk]ey)?|[Pp]assword):/ {
+            s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p
+            q
+        }' <<< "$key_re")
+
     else
+        # 推导公钥
         local pub_re="$($XRAY_BIN x25519 -i "$PRIV")"
-        PUB=$(sed -nE '/(Public( key)?|Password):/ { s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p; q; }' <<< "$pub_re")
+        PUB=$(sed -nE '/([Pp]ublic([[:space:]]*[Kk]ey)?|[Pp]assword):/ {
+            s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p
+            q
+        }' <<< "$pub_re")
     fi
 
     # 最终全量校验
-    [[ ${#PRIV} -eq 43 && ${#PUB} -eq 43 ]] || log_err "密钥解析或推导失败"
+    [[ ${#PRIV} -eq 43 && ${#PUB} -eq 43 ]] || log_err "密钥解析失败！PRIV:${#PRIV} PUB:${#PUB}"
     
     log_ok "全链路密钥解析成功 (43/43位验证通过)"
 

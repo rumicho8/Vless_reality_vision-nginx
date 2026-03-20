@@ -412,13 +412,20 @@ module_config_xray() {
     [[ -z "$SID" || "$SID" == "null" ]] && SID=$(openssl rand -hex 8)
     
     if [[ -z "$PRIV" || "$PRIV" == "null" ]]; then
-        local key_re
-        key_re=$($XRAY_BIN x25519)
-        PRIV=$(echo "$key_re" | grep -Ei "Private" | awk '{print $NF}')
-        PUB=$(echo "$key_re" | grep -Ei "Public|Password" | awk '{print $NF}')
+        local key_re="$($XRAY_BIN x25519)"
+    
+        PRIV=$(sed -nE '/Private( key)?:/ { s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p; q; }' <<< "$key_re")
+        PUB=$(sed -nE '/(Public( key)?|Password):/ { s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p; q; }' <<< "$key_re")
+        
     else
-        PUB=$($XRAY_BIN x25519 -i "$PRIV" | grep -Ei "Public|Password" | awk '{print $NF}')
+        local pub_re="$($XRAY_BIN x25519 -i "$PRIV")"
+        PUB=$(sed -nE '/(Public( key)?|Password):/ { s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p; q; }' <<< "$pub_re")
     fi
+
+    # 最终全量校验
+    [[ ${#PRIV} -eq 43 && ${#PUB} -eq 43 ]] || log_err "密钥解析或推导失败"
+    
+    log_ok "全链路密钥解析成功 (43/43位验证通过)"
 
     mkdir -p "$XRAY_CONF_DIR"
     local dest_addr="127.0.0.1:8443"

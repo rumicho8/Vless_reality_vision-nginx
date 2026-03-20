@@ -327,7 +327,8 @@ EOF
     
     mkdir -p "$target_dir"
     # 使用 :? 确保变量安全，防止 rm -rf /*
-    rm -rf "${target_dir:?}"/* echo -e "${C_BLUE}------------------- 模板拉取进度 -------------------${C_RESET}"
+    rm -rf "${target_dir:?}"/*
+    echo -e "${C_BLUE}------------------- 模板拉取进度 -------------------${C_RESET}"
     # 集成了3次重试 和 15秒超时
     if curl -fL -# \
         --connect-timeout 15 \
@@ -393,10 +394,9 @@ module_install_xray_core() {
        --retry-delay 2 \
        -m 120 \
        -o "xray.zip" "$zip_url"; then
-       log_ok "核心下载成功"
-else
-       log_err "核心下载失败，请检查网络连通性"
-fi
+        log_ok "核心下载成功"
+    else
+        log_err "核心下载失败，请检查网络连通性"
     fi
     echo -e "${C_BLUE}----------------------------------------------------${C_RESET}"
     

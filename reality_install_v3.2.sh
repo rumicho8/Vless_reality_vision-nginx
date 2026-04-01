@@ -455,35 +455,44 @@ module_config_xray() {
     [[ -z "$UUID" || "$UUID" == "null" ]] && UUID=$(uuidgen)
     [[ -z "$SID" || "$SID" == "null" ]] && SID=$(openssl rand -hex 8)
     
+# === 终极防御机制：语义锚定 + X25519 单向推导双重校验 ===
     if [[ -z "$PRIV" || "$PRIV" == "null" ]]; then
-        local key_re="$($XRAY_BIN x25519)"
-    
-        # 提取私钥：匹配到 Private 行后，s 命令提取其中的 43 位密钥为 \1
-        PRIV=$(sed -nE '/[Pp]rivate([[:space:]]*[Kk]ey)?:/ {
-            s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p
-            q
-        }' <<< "$key_re")
-
-        # 提取公钥/密码：匹配到相应行后，s 命令提取其中的 43 位密钥同样为 \1
-        PUB=$(sed -nE '/([Pp]ublic([[:space:]]*[Kk]ey)?|[Pp]assword):/ {
-            s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p
-            q
-        }' <<< "$key_re")
-
+        local key_re="$($XRAY_BIN x25519 | tr -d '\r')"
+        
+        # 第一层防御（语义过滤）：只提取带有核心标识的行，将 Hash32 或未来的未知副密钥踢出候选池
+        mapfile -t KEYS < <(echo "$key_re" | grep -iE "Private|Public|Password" | grep -oE '[A-Za-z0-9_-]{43}')
+        
+        PRIV=""
+        PUB=""
+        
+        # 第二层防御（数学验证）：在受信任的集合内，寻找唯一成立的标量乘法关系
+        for p_priv in "${KEYS[@]}"; do
+            # 利用 Xray 工具自身推导，提取算出的公钥
+            local calc_pub=$($XRAY_BIN x25519 -i "$p_priv" 2>/dev/null | grep -iE "Public|Password" | grep -oE '[A-Za-z0-9_-]{43}' | head -n1)
+            
+            # 严格判定：推导出的公钥不仅要是 43 位，且必须存在于我们刚才过滤出的 KEYS 集合中！
+            for p_pub in "${KEYS[@]}"; do
+                if [[ "$calc_pub" == "$p_pub" && "$p_priv" != "$p_pub" ]]; then
+                    PRIV="$p_priv"
+                    PUB="$p_pub"
+                    break 2 # 匹配成功，瞬间击碎双重循环
+                fi
+            done
+        done
+        
     else
-        # 推导公钥
-        local pub_re="$($XRAY_BIN x25519 -i "$PRIV")"
-        PUB=$(sed -nE '/([Pp]ublic([[:space:]]*[Kk]ey)?|[Pp]assword):/ {
-            s/.*:[[:space:]]*([A-Za-z0-9_-]{43})[[:space:]]*$/\1/p
-            q
-        }' <<< "$pub_re")
+        # 若已有私钥，则直接推导公钥
+        PUB=$($XRAY_BIN x25519 -i "$PRIV" 2>/dev/null | grep -iE "Public|Password" | grep -oE '[A-Za-z0-9_-]{43}' | head -n1)
     fi
 
-    # 最终全量校验
-    [[ ${#PRIV} -eq 43 && ${#PUB} -eq 43 ]] || log_err "密钥解析失败！PRIV:${#PRIV} PUB:${#PUB}"
+    # 终极底线拦截与 DEBUG 输出
+    [[ ${#PRIV} -eq 43 && ${#PUB} -eq 43 ]] || {
+        echo -e "\n${C_RED}[DEBUG] 核心输出异常流：\n${key_re}${C_RESET}"
+        log_err "密钥解析失败！PRIV:${#PRIV} PUB:${#PUB}"
+    }
     
     log_ok "全链路密钥解析成功 (43/43位验证通过)"
-
+    
     mkdir -p "$XRAY_CONF_DIR"
     local dest_addr="127.0.0.1:8443"
     local server_names_json="[\"$domain\", \"www.$domain\"]"

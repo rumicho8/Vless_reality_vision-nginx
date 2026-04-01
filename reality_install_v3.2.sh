@@ -243,6 +243,14 @@ module_issue_cert() {
         
         if [[ -s "$cert_file" ]]; then
             log_ok "SSL 证书申请并签发成功。"
+            # === 注入全局无痕配置 ===
+            local acme_conf="/root/.acme.sh/account.conf"
+            if [[ -f "$acme_conf" ]]; then
+                grep -q "LE_NO_LOG" "$acme_conf" || echo "LE_NO_LOG='1'" >> "$acme_conf"
+                grep -q "LE_LOG_FILE" "$acme_conf" || echo "LE_LOG_FILE='/dev/null'" >> "$acme_conf"
+                grep -q "DEBUG" "$acme_conf" || echo "DEBUG='0'" >> "$acme_conf"
+                log_info "已将极致无痕变量硬编码至 Acme.sh 核心配置。"
+            fi
         else
             log_err "SSL 证书申请失败！请检查上方输出的 API 报错信息。"
         fi
@@ -560,7 +568,8 @@ EOF
     echo -e "\e[36m----------------------------------------------------\e[0m"
     
     local tmp_cron="/tmp/xray_cron"
-    crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh" > "$tmp_cron" || true
+    crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh|CRON_TZ" > "$tmp_cron" || true
+    echo "CRON_TZ=Asia/Singapore" >> "$tmp_cron"
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
         echo "0 2 * * * \"/root/.acme.sh/acme.sh\" --cron --home \"/root/.acme.sh\" > /dev/null" >> "$tmp_cron"
         log_ok "自动化任务统筹完毕 (Acme 强制锁定 2:00，路由库锁定周一 3:00)。"
@@ -711,7 +720,7 @@ while true; do
             rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
             rm -rf /var/www/html/* "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh
             
-            crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh" | crontab - 2>/dev/null || true
+            crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh|CRON_TZ" | crontab - 2>/dev/null || true
             
             sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
             [[ -f /home/admin/.bashrc ]] && sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null

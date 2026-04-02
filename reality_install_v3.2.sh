@@ -641,7 +641,7 @@ EOF
     # [2] ACME 证书续期（每天 02:00 新加坡时间）
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
         # 必须先从 crontab 精准拔除 acme 官方自动写入的任务，防止 cron 和 systemd 争抢
-        crontab -l 2>/dev/null | grep -vF "/root/.acme.sh/acme.sh" | crontab - 2>/dev/null || true
+        crontab -l 2>/dev/null | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
 
         cat > /etc/systemd/system/xray-acme.service <<EOF
 [Unit]
@@ -828,7 +828,7 @@ while true; do
             rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
             rm -rf /var/www/html/{*,.[!.]*,..?*} "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh 2>/dev/null
             
-            crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vF "/root/.acme.sh/acme.sh" | crontab - 2>/dev/null || true
+            crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
             
             sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
             [[ -f /home/admin/.bashrc ]] && sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null

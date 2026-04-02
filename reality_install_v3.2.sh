@@ -14,7 +14,7 @@ fi
 # =========================================================
 # 模块 0：全局配置与核心变量
 # =========================================================
-readonly SCRIPT_VERSION="Pro Final V7"
+readonly SCRIPT_VERSION="Pro Final V8 (Systemd High-Avail)"
 readonly LOG_FILE="/dev/null"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"
@@ -547,51 +547,143 @@ EOF
 }
 
 # =========================================================
-# 模块 7：路由规则与自动化任务
+# 模块 7：路由规则与自动化任务 (Systemd Timers 高可用架构)
 # =========================================================
 module_setup_automation() {
     log_info "配置路由规则原子更新机制与定时任务调度..."
     mkdir -p "$SCRIPT_DIR"
-    
-    cat > "$SCRIPT_DIR/update-dat.sh" <<EOF
+
+    # === 1. 生成具备状态校验、防重入锁、重试机制的更新脚本 ===
+    cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
 #!/bin/bash
-SHARE_DIR="$XRAY_SHARE_DIR"
+
+# [高阶防御 1] 文件描述符互斥锁，绝对防止 Timer 与手动执行并发产生 Race Condition
+exec 9> /var/lock/xray-dat.lock
+flock -n 9 || exit 0
+
+SHARE_DIR="/usr/local/share/xray"
+changed=0
+
 update_f() {
-    local f=\$1; local u=\$2
-    if curl -fL -o "\$SHARE_DIR/\${f}.new" "\$u" && [[ -s "\$SHARE_DIR/\${f}.new" ]]; then
-        mv -f "\$SHARE_DIR/\${f}.new" "\$SHARE_DIR/\$f"; return 0
+    local f=$1
+    local u=$2
+    # [高阶防御 2] 增加重试退避机制与双重超时，抵抗 GitHub CDN 抖动
+    if curl -fL \
+        --connect-timeout 10 \
+        --max-time 120 \
+        --retry 3 \
+        --retry-delay 5 \
+        --retry-connrefused \
+        -o "$SHARE_DIR/${f}.new" "$u" && [[ -s "$SHARE_DIR/${f}.new" ]]; then
+        
+        # 核心优化：二进制比对，只有真实变化才触发后续重载逻辑
+        if ! cmp -s "$SHARE_DIR/${f}.new" "$SHARE_DIR/$f"; then
+            mv -f "$SHARE_DIR/${f}.new" "$SHARE_DIR/$f"
+            changed=1
+            return 0
+        fi
     fi
-    rm -f "\$SHARE_DIR/\${f}.new"; return 1
+    rm -f "$SHARE_DIR/${f}.new"
+    return 1
 }
+
 update_f "geoip.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 update_f "geosite.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
-systemctl restart xray >/dev/null 2>&1
+
+# [高阶防御 3] 仅在变更时触发，且优先尝试平滑重载 (Reload) 保护活跃连接，失败才重启
+if [[ $changed -eq 1 ]]; then
+    systemctl reload xray 2>/dev/null || systemctl restart xray >/dev/null 2>&1
+fi
 EOF
+
+    # 确保脚本可执行
     chmod +x "$SCRIPT_DIR/update-dat.sh"
-    
+
     echo -e "\e[36m-------------------- 路由库同步 --------------------\e[0m"
     bash "$SCRIPT_DIR/update-dat.sh" 2>&1 | tee -a "$LOG_FILE"
     echo -e "\e[36m----------------------------------------------------\e[0m"
-    
-    local tmp_cron="/tmp/xray_cron"
-    crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh|CRON_TZ" > "$tmp_cron" || true
-    
-    # === 自动时差换算逻辑 ===
-    local SGT_ACME_EPOCH=$(TZ="Asia/Singapore" date -d "02:00 today" +%s)
-    local SGT_ROUTING_EPOCH=$(TZ="Asia/Singapore" date -d "03:00 today" +%s)
-    local LOCAL_ACME_HOUR=$(date -d "@$SGT_ACME_EPOCH" +%k | tr -d ' ')
-    local LOCAL_ROUTING_HOUR=$(date -d "@$SGT_ROUTING_EPOCH" +%k | tr -d ' ')
-    
+
+    # === 清理旧 cron (精准打击，防误杀) ===
+    crontab -l 2>/dev/null | grep -vF "update-dat.sh" | crontab - 2>/dev/null || true
+
+    # === 部署 Systemd Timers 原子化调度 ===
+
+    # [1] 路由库 Service (加入 TimeoutStartSec 防僵尸进程)
+    cat > /etc/systemd/system/xray-dat.service <<EOF
+[Unit]
+Description=Xray Dat Update Service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root
+ExecStart=$SCRIPT_DIR/update-dat.sh
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+TimeoutStartSec=2min
+Restart=on-failure
+RestartSec=60
+EOF
+
+    # [1] 路由库 Timer（每周一 03:00 新加坡时间）
+    cat > /etc/systemd/system/xray-dat.timer <<EOF
+[Unit]
+Description=Timer for Xray Dat Update (SGT)
+
+[Timer]
+OnCalendar=Mon *-*-* 03:00:00 Asia/Singapore
+Persistent=true
+RandomizedDelaySec=10m
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    # [2] ACME 证书续期（每天 02:00 新加坡时间）
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
-        echo "0 $LOCAL_ACME_HOUR * * * \"/root/.acme.sh/acme.sh\" --cron --home \"/root/.acme.sh\" > /dev/null" >> "$tmp_cron"
-        log_ok "自动化任务统筹完毕 (动态换算时区：Acme 锁定本地 $LOCAL_ACME_HOUR:00，路由库周一 $LOCAL_ROUTING_HOUR:00)。"
-    else
-        log_ok "自动化任务统筹完毕 (纯净模式：仅锁定路由库同步，无证书负担)。"
+        # 必须先从 crontab 精准拔除 acme 官方自动写入的任务，防止 cron 和 systemd 争抢
+        crontab -l 2>/dev/null | grep -vF "/root/.acme.sh/acme.sh" | crontab - 2>/dev/null || true
+
+        cat > /etc/systemd/system/xray-acme.service <<EOF
+[Unit]
+Description=Acme.sh Certificate Renewal Service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root
+ExecStart=/root/.acme.sh/acme.sh --cron --home /root/.acme.sh
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+TimeoutStartSec=5min
+Restart=on-failure
+RestartSec=60
+EOF
+
+        cat > /etc/systemd/system/xray-acme.timer <<EOF
+[Unit]
+Description=Timer for Acme.sh Renewal (SGT)
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 Asia/Singapore
+Persistent=true
+RandomizedDelaySec=5m
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target
+EOF
     fi
-    echo "0 $LOCAL_ROUTING_HOUR * * 1 $SCRIPT_DIR/update-dat.sh > /dev/null 2>&1" >> "$tmp_cron"
-    
-    crontab "$tmp_cron" && rm -f "$tmp_cron"
-    
+
+    # === 加载并启用 ===
+    systemctl daemon-reload
+
+    systemctl enable --now xray-dat.timer >/dev/null 2>&1
+
+    if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
+        systemctl enable --now xray-acme.timer >/dev/null 2>&1
+        log_ok "自动化任务统筹完毕 (SGT：Acme 每天 02:00，路由库每周一 03:00)"
+    else
+        log_ok "自动化任务统筹完毕 (纯净模式：仅路由库定时器，SGT 周一 03:00)"
+    fi
+
     log_ok "Xray Reality 节点启动成功。"
 }
 
@@ -728,15 +820,15 @@ while true; do
         1) main_install ; break ;;
         2)
             echo -e "\n${C_BLUE}[INFO]${C_RESET} 开始执行外科手术级卸载..."
-            systemctl stop xray nginx >/dev/null 2>&1
-            systemctl disable xray nginx >/dev/null 2>&1
-            rm -f /etc/systemd/system/xray.service /usr/local/bin/xray
+            systemctl stop xray nginx xray-acme.timer xray-acme.service xray-dat.timer xray-dat.service >/dev/null 2>&1
+            systemctl disable xray nginx xray-acme.timer xray-dat.timer >/dev/null 2>&1
+            rm -f /etc/systemd/system/xray.service /usr/local/bin/xray /etc/systemd/system/xray-acme.* /etc/systemd/system/xray-dat.*
             systemctl daemon-reload
             
             rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
-            rm -rf /var/www/html/* "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh
+            rm -rf /var/www/html/{*,.[!.]*,..?*} "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh 2>/dev/null
             
-            crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh|CRON_TZ" | crontab - 2>/dev/null || true
+            crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vF "/root/.acme.sh/acme.sh" | crontab - 2>/dev/null || true
             
             sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
             [[ -f /home/admin/.bashrc ]] && sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null
@@ -744,8 +836,8 @@ while true; do
             echo -e "${C_GREEN}[OK] 系统已彻底卸载清理，且已拔除历史记录与伪装站源码。${C_RESET}"
             read -rp "按回车键返回..." ;;
         3)
-            echo -e "\n${C_BLUE}--- 定时任务列表 ---${C_RESET}"
-            crontab -l | grep -E "acme.sh|update-dat.sh" || echo "无调度任务"
+            echo -e "\n${C_BLUE}--- 定时任务列表 (Systemd Timers) ---${C_RESET}"
+            systemctl list-timers --all | grep -E "xray-acme|xray-dat" || echo "无调度任务"
             echo -e "\n${C_BLUE}--- 证书续期服务状态 ---${C_RESET}"
             [[ -f "/root/.acme.sh/acme.sh" ]] && /root/.acme.sh/acme.sh --cron --home "/root/.acme.sh"
             read -rp "按回车键返回..." ;;

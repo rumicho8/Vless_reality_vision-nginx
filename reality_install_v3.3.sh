@@ -792,11 +792,19 @@ main_install() {
     module_setup_bbr
     module_get_inputs
     
+# 2. 【核心修复】根据当前选择的模式，决定 Nginx 的死活
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
+        # 模式 1：需要 Nginx，执行申请和配置
         module_issue_cert "$GLOBAL_DOMAIN" "$GLOBAL_DNS_API"
         module_config_nginx "$GLOBAL_DOMAIN"
     else
-        log_info "纯净无域名模式：跳过 SSL 证书申请与 Nginx 伪装部署。"
+        # 模式 2：不需要 Nginx
+        log_info "纯净模式 2：正在物理关停并阻断 Nginx 遗留进程..."
+        systemctl stop nginx >/dev/null 2>&1
+        systemctl disable nginx >/dev/null 2>&1
+        # 清理掉 Nginx 的 Xray 专属配置文件，防止它重启后乱占端口
+        rm -f /etc/nginx/sites-enabled/xray
+        log_ok "Nginx 幽灵进程已彻底超度。"
     fi
     
     module_install_xray_core

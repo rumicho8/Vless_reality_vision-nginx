@@ -6,17 +6,9 @@
 
 # --- 提权与执行检查 ---
 if [[ $EUID -ne 0 ]]; then
-    echo -e "\e[31m[ERROR] 必须使用 Root 权限运行，正在尝试提权...\e[0m"
-    SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null)"
-    [[ -z "$SCRIPT_PATH" ]] && SCRIPT_PATH="$0"
-    if command -v sudo >/dev/null 2>&1; then
-        exec sudo -E bash "$SCRIPT_PATH" "$@"
-    elif command -v su >/dev/null 2>&1; then
-        exec su -c "bash $SCRIPT_PATH $*"
-    else
-        echo -e "\e[31m[ERROR] 无法提权：系统没有 sudo 或 su\e[0m"
-        exit 1
-    fi
+    echo -e "\e[31m[ERROR] 安全拦截：必须使用 Root 权限运行此部署引擎。\e[0m"
+    echo -e "\e[33m请先执行 'sudo -i' 或 'su -' 彻底切换到 root 环境后，再次运行本脚本。\e[0m"
+    exit 1
 fi
 
 # =========================================================
@@ -583,14 +575,21 @@ EOF
     
     local tmp_cron="/tmp/xray_cron"
     crontab -l 2>/dev/null | grep -vE "update-dat.sh|acme.sh|CRON_TZ" > "$tmp_cron" || true
-    echo "CRON_TZ=Asia/Singapore" >> "$tmp_cron"
+    
+    # === 自动时差换算逻辑 ===
+    local SGT_ACME_EPOCH=$(TZ="Asia/Singapore" date -d "02:00 today" +%s)
+    local SGT_ROUTING_EPOCH=$(TZ="Asia/Singapore" date -d "03:00 today" +%s)
+    local LOCAL_ACME_HOUR=$(date -d "@$SGT_ACME_EPOCH" +%k | tr -d ' ')
+    local LOCAL_ROUTING_HOUR=$(date -d "@$SGT_ROUTING_EPOCH" +%k | tr -d ' ')
+    
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
-        echo "0 2 * * * \"/root/.acme.sh/acme.sh\" --cron --home \"/root/.acme.sh\" > /dev/null" >> "$tmp_cron"
-        log_ok "自动化任务统筹完毕 (Acme 强制锁定 2:00，路由库锁定周一 3:00)。"
+        echo "0 $LOCAL_ACME_HOUR * * * \"/root/.acme.sh/acme.sh\" --cron --home \"/root/.acme.sh\" > /dev/null" >> "$tmp_cron"
+        log_ok "自动化任务统筹完毕 (动态换算时区：Acme 锁定本地 $LOCAL_ACME_HOUR:00，路由库周一 $LOCAL_ROUTING_HOUR:00)。"
     else
         log_ok "自动化任务统筹完毕 (纯净模式：仅锁定路由库同步，无证书负担)。"
     fi
-    echo "0 3 * * 1 $SCRIPT_DIR/update-dat.sh > /dev/null 2>&1" >> "$tmp_cron"
+    echo "0 $LOCAL_ROUTING_HOUR * * 1 $SCRIPT_DIR/update-dat.sh > /dev/null 2>&1" >> "$tmp_cron"
+    
     crontab "$tmp_cron" && rm -f "$tmp_cron"
     
     log_ok "Xray Reality 节点启动成功。"
@@ -720,7 +719,7 @@ while true; do
     echo -e "${C_BLUE}    Xray Reality 工业级管理工具 ($SCRIPT_VERSION)${C_RESET}"
     echo "------------------------------------------------"
     echo "1. 安装 / 无损覆盖更新"
-    echo "2. 彻底卸载与清理"
+    echo "2.彻底卸载与清理"
     echo "3. 证书与定时任务自检"
     echo "0. 退出"
     read -rp "请选择数字 [0-3]: " OPT

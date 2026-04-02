@@ -299,6 +299,11 @@ EOF
     local tmp_conf="/tmp/xray_nginx.conf"
     cat > "$tmp_conf" <<EOF
 server {
+    listen 127.0.0.1:8443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+server {
     listen 127.0.0.1:8443 ssl http2;
     ssl_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
@@ -605,14 +610,17 @@ module_setup_stealth() {
             local TRAP_CODE="
 # === 系统级安全无痕审计防护 (自动注入) ===
 cleanup_on_exit() {
-    cd / >/dev/null 2>&1
-    history -c
-    rm -f \$HOME/.bash_history
-    local SUDO_CMD=\"\"
-    command -v sudo >/dev/null 2>&1 && SUDO_CMD=\"sudo\"
-    \$SUDO_CMD journalctl --rotate >/dev/null 2>&1
-    \$SUDO_CMD journalctl --vacuum-time=1s >/dev/null 2>&1
-    [ -f /var/log/auth.log ] && \$SUDO_CMD truncate -s 0 /var/log/auth.log >/dev/null 2>&1
+    # 仅在 SSH 连接真实断开时触发清理，忽略子 Shell 退出
+    if [ -n \"\$SSH_CLIENT\" ] || [ -n \"\$SSH_TTY\" ]; then
+        cd / >/dev/null 2>&1
+        history -c
+        rm -f \$HOME/.bash_history
+        local SUDO_CMD=\"\"
+        command -v sudo >/dev/null 2>&1 && SUDO_CMD=\"sudo\"
+        \$SUDO_CMD journalctl --rotate >/dev/null 2>&1
+        \$SUDO_CMD journalctl --vacuum-time=1s >/dev/null 2>&1
+        [ -f /var/log/auth.log ] && \$SUDO_CMD truncate -s 0 /var/log/auth.log >/dev/null 2>&1
+    fi
 }
 trap cleanup_on_exit EXIT SIGHUP"
 

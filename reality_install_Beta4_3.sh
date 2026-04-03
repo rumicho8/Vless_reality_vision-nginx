@@ -257,26 +257,32 @@ module_issue_cert() {
         cd "$tmp_acme" || log_err "工作区目录初始化失败。"
         
         echo -e "${C_BLUE}------------------- 证书下发流 -------------------${C_RESET}"
-        curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}"
-        
-        [[ ! -f "$acme_bin" ]] && log_err "Acme.sh 组件拉取异常。"
-        
-        $acme_bin --upgrade --auto-upgrade "$AUTO_UPGRADE" >/dev/null 2>&1
-        
-        if [[ "$api" == "standalone" ]]; then
-            systemctl stop nginx >/dev/null 2>&1
-            $acme_bin --issue -d "$domain" -d "www.$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"
+# 2. 原子安装逻辑：合并执行与物理文件校验
+        if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}" && [[ -s "$acme_bin" ]]; then
+            log_ok "Acme.sh 引导组件安装成功。"
+            # 只有安装成功才尝试升级
+            "$acme_bin" --upgrade --auto-upgrade "$AUTO_UPGRADE" >/dev/null 2>&1
         else
-            $acme_bin --issue --dns "$api" -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE
+            # 这里的 else 取代了原先分散的 [[ ! -f ]] 判定
+            log_err "Acme.sh 组件拉取或安装异常，请检查网络连通性。"
         fi
         
-        $acme_bin --install-cert -d "$domain" --ecc \
+        # 3. 证书签发逻辑 (增加双引号保护变量)
+        if [[ "$api" == "standalone" ]]; then
+            systemctl stop nginx >/dev/null 2>&1
+            "$acme_bin" --issue -d "$domain" -d "www.$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"
+        else
+            "$acme_bin" --issue --dns "$api" -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE
+        fi
+        
+        # 4. 证书部署与服务关联
+        "$acme_bin" --install-cert -d "$domain" --ecc \
             --key-file "/etc/nginx/ssl/${domain}_ecc.key" \
             --fullchain-file "$cert_file" \
             --reloadcmd "systemctl restart nginx || true"
         echo -e "${C_BLUE}--------------------------------------------------${C_RESET}"
             
-        cd "$HOME"
+        cd "$HOME" || true
         
         if [[ -s "$cert_file" ]]; then
             log_ok "ECC 证书颁发及本地部署完成。"

@@ -558,7 +558,7 @@ SHARE_DIR="/usr/local/share/xray"
 changed=0
 update_f() {
     local f=$1; local u=$2
-    if curl -sfL --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 5 --retry-connrefused -o "$SHARE_DIR/${f}.new" "$u" && [[ -s "$SHARE_DIR/${f}.new" ]]; then
+    if curl -fL --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 5 --retry-connrefused -o "$SHARE_DIR/${f}.new" "$u" && [[ -s "$SHARE_DIR/${f}.new" ]]; then
         if ! cmp -s "$SHARE_DIR/${f}.new" "$SHARE_DIR/$f"; then
             mv -f "$SHARE_DIR/${f}.new" "$SHARE_DIR/$f"
             changed=1; return 0

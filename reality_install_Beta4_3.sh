@@ -257,7 +257,7 @@ module_issue_cert() {
         cd "$tmp_acme" || log_err "工作区目录初始化失败。"
         
         echo -e "${C_BLUE}------------------- 证书下发流 -------------------${C_RESET}"
-        curl -sfm 15 https://get.acme.sh | sh -s email="admin@${domain}"
+        curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}"
         
         [[ ! -f "$acme_bin" ]] && log_err "Acme.sh 组件拉取异常。"
         
@@ -379,7 +379,9 @@ EOF
     rm -rf "${target_dir:?}/"* "${target_dir:?}/".[!.]* "${target_dir:?}/"..?* 2>/dev/null
 
     echo -e "${C_BLUE}------------------- 资源拉取流 -------------------${C_RESET}"
-    if curl -fL -# --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 2 -o /tmp/web_template.zip "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main"; then
+    if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused --max-time 120 \
+   -o /tmp/web_template.zip "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main" \
+   && [[ -s /tmp/web_template.zip ]]; then
         echo -e "${C_BLUE}------------------- 解压部署流 -------------------${C_RESET}"
         mkdir -p "$temp_extract"
         if unzip -qo /tmp/web_template.zip -d "$temp_extract"; then
@@ -425,7 +427,7 @@ module_install_xray_core() {
     local zip_url="https://github.com/XTLS/Xray-core/releases/latest/download/${zip_name}"
     
     echo -e "${C_BLUE}------------------- 核心下载流 -------------------${C_RESET}"
-    if curl -fL -# --connect-timeout 10 --retry 3 --retry-delay 2 -m 120 -o "$zip_name" "$zip_url"; then
+    if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 120 -o "$zip_name" "$zip_url" && [[ -s "$zip_name" ]]; then
         log_ok "二进制归档包下载成功。"
     else
         log_err "二进制归档包拉取失败，目标地址拒绝连接。"
@@ -558,7 +560,7 @@ SHARE_DIR="/usr/local/share/xray"
 changed=0
 update_f() {
     local f=$1; local u=$2
-    if curl -fL --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 5 --retry-connrefused -o "$SHARE_DIR/${f}.new" "$u" && [[ -s "$SHARE_DIR/${f}.new" ]]; then
+    if curl -fL --connect-timeout 10 --max-time 120 --retry 5 --retry-delay 3 --retry-connrefused -o "$SHARE_DIR/${f}.new" "$u" && [[ -s "$SHARE_DIR/${f}.new" ]]; then
         if ! cmp -s "$SHARE_DIR/${f}.new" "$SHARE_DIR/$f"; then
             mv -f "$SHARE_DIR/${f}.new" "$SHARE_DIR/$f"
             changed=1; return 0

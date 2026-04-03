@@ -14,7 +14,7 @@ fi
 # =========================================================
 # 模块 0：全局常量与环境变量初始化
 # =========================================================
-readonly SCRIPT_VERSION="Pro Final V9 (Stability Edition)"
+readonly SCRIPT_VERSION="Pro Final V1 (Stability Edition)"
 readonly LOG_FILE="/dev/null"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"

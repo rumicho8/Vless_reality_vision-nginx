@@ -878,6 +878,24 @@ while true; do
             sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
             [[ -f /home/admin/.bashrc ]] && sed -i '/# === 系统级安全无痕审计防护/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null
             
+            # === 新增：焦土级卸载确认 ===
+            echo -e "\n${C_YELLOW}业务核心数据已清理完毕。${C_RESET}"
+            echo -e "${C_RED}是否执行【焦土级卸载】？${C_RESET}"
+            echo -e "将连同 Nginx、Socat、jq、qrencode、uuid、cron 等底层依赖一并彻底粉碎！（BBR加速与日志限制优化将保留）"
+            read -rp "若您的服务器上有其他业务依赖这些底层库，请务必选 N！[y/N, 默认 N]: " SCORCHED_EARTH
+            case "${SCORCHED_EARTH}" in
+                [yY][eE][sS]|[yY])
+                    log_info "正在执行焦土级清理 (卸载系统底层依赖)..."
+                    apt-get purge -yqq nginx nginx-common socat qrencode jq uuid-runtime cron >/dev/null 2>&1
+                    apt-get autoremove -yqq >/dev/null 2>&1
+                    apt-get clean >/dev/null 2>&1
+                    log_ok "焦土清理完毕！底层依赖已全部抹除。"
+                    ;;
+                *)
+                    log_info "已跳过焦土级清理，保留系统底层依赖。"
+                    ;;
+            esac
+            
             echo -e "${C_GREEN}[OK] 系统已彻底卸载清理，且已拔除历史记录与伪装站源码。${C_RESET}"
             read -rp "按回车键返回..." ;;
         3)

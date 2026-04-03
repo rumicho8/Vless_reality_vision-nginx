@@ -379,7 +379,7 @@ EOF
     rm -rf "${target_dir:?}/"* "${target_dir:?}/".[!.]* "${target_dir:?}/"..?* 2>/dev/null
 
     echo -e "${C_BLUE}------------------- 资源拉取流 -------------------${C_RESET}"
-    if curl -sfL -# --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 2 -o /tmp/web_template.zip "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main"; then
+    if curl -fL -# --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 2 -o /tmp/web_template.zip "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main"; then
         echo -e "${C_BLUE}------------------- 解压部署流 -------------------${C_RESET}"
         mkdir -p "$temp_extract"
         if unzip -qo /tmp/web_template.zip -d "$temp_extract"; then
@@ -425,7 +425,7 @@ module_install_xray_core() {
     local zip_url="https://github.com/XTLS/Xray-core/releases/latest/download/${zip_name}"
     
     echo -e "${C_BLUE}------------------- 核心下载流 -------------------${C_RESET}"
-    if curl -sfL -# --connect-timeout 15 --retry 3 --retry-delay 2 -m 120 -o "$zip_name" "$zip_url"; then
+    if curl -fL -# --connect-timeout 10 --retry 3 --retry-delay 2 -m 120 -o "$zip_name" "$zip_url"; then
         log_ok "二进制归档包下载成功。"
     else
         log_err "二进制归档包拉取失败，目标地址拒绝连接。"

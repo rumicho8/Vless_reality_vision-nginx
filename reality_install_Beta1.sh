@@ -65,11 +65,11 @@ log_err()  { echo -e "${C_RED}[ERROR]${C_RESET} $1" | tee -a "$LOG_FILE"; exit 1
 # 模块 2：安装基础环境和依赖
 # =========================================================
 module_prepare_env() {
-    log_info "正在创建系统必备目录..."
+    log_info "正在创建系统必备目录并配置日志策略..."
 
-    # 限制系统日志大小，防止长期运行占满硬盘
+    # --- 修复：限制系统日志大小为 100M 且保留时长为 7 天 ---
     mkdir -p /etc/systemd/journald.conf.d/
-    echo -e "[Journal]\nSystemMaxUse=100M\nForwardToSyslog=no" > /etc/systemd/journald.conf.d/99-prophet.conf
+    echo -e "[Journal]\nSystemMaxUse=100M\nMaxRetentionSec=7day\nForwardToSyslog=no" > /etc/systemd/journald.conf.d/99-prophet.conf
     systemctl restart systemd-journald || true
 
     log_info "正在更新软件源并检查基础组件..."
@@ -275,7 +275,8 @@ module_issue_cert() {
         
         # 3. 开始申请证书
         if [[ "$api" == "standalone" ]]; then
-            systemctl stop nginx >/dev/null 2>&1
+            # 只有在 nginx 命令存在时才尝试停止
+            command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1
             "$acme_bin" --issue -d "$domain" -d "www.$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"
         else
             "$acme_bin" --issue --dns "$api" -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE
@@ -721,16 +722,33 @@ module_show_result() {
 # =========================================================
 main_install() {
     cd "$HOME" || exit 1
-    systemctl stop xray nginx >/dev/null 2>&1
+    
+    # 严谨的初始清理：仅停止存在且运行的服务
+    systemctl stop xray >/dev/null 2>&1
+    command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1
+
     module_get_inputs
     module_prepare_env
     module_setup_bbr
+    
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
-        module_issue_cert "$GLOBAL_DOMAIN" "$GLOBAL_DNS_API"; module_config_nginx "$GLOBAL_DOMAIN"
+        module_issue_cert "$GLOBAL_DOMAIN" "$GLOBAL_DNS_API"
+        module_config_nginx "$GLOBAL_DOMAIN"
     else
-        systemctl stop nginx >/dev/null 2>&1; systemctl disable nginx >/dev/null 2>&1; rm -f /etc/nginx/sites-enabled/xray
+        # 模式切换严谨清理逻辑：从模式 1 切换到 模式 2 必须彻底停用 Nginx
+        if command -v nginx >/dev/null 2>&1; then
+            systemctl stop nginx >/dev/null 2>&1
+            systemctl disable nginx >/dev/null 2>&1
+        fi
+        rm -f /etc/nginx/sites-enabled/xray
     fi
-    module_install_xray_core; module_config_xray "$GLOBAL_DOMAIN"; module_setup_automation; module_setup_stealth; module_cleanup; module_show_result
+    
+    module_install_xray_core
+    module_config_xray "$GLOBAL_DOMAIN"
+    module_setup_automation
+    module_setup_stealth
+    module_cleanup
+    module_show_result
 }
 
 # =========================================================

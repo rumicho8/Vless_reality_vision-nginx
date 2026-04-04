@@ -14,7 +14,7 @@ fi
 # =========================================================
 # 模块 0：全局常量与环境变量初始化
 # =========================================================
-readonly SCRIPT_VERSION="Pro Final V2 (Stealth Master Edition)"
+readonly SCRIPT_VERSION="Pro Final VMax (Original Fidelity)"
 readonly LOG_FILE="/dev/null"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"
@@ -215,8 +215,8 @@ except:
     fi
 
     echo -e "\n${C_YELLOW}--- 系统安全审计策略 (Stealth Mode) ---${C_RESET}"
-    echo -e "激活后将启用系统级 SSH 接管引擎：\n 1. 彻底清除真实用户的命令历史缓冲区\n 2. 抹除 wtmp/btmp/lastlog 等系统登录账本\n ${C_RED}安全提示：此策略为系统级强制拦截，将限制常规审计排查能力。${C_RESET}"
-    read -rp "是否启用 Stealth Mode 极客无痕模式？[y/N, 默认 N]: " STEALTH_INPUT
+    echo -e "激活后，每次退出 SSH 会话将自动触发以下清理操作：\n 1. 彻底清除真实用户的命令历史缓冲区\n 2. 抹除 wtmp/btmp/lastlog 等系统登录账本\n ${C_RED}安全提示：此策略为系统级强制接管，将限制常规审计排查能力。${C_RESET}"
+    read -rp "是否启用 Stealth Mode 审计拦截？[y/N, 默认 N]: " STEALTH_INPUT
     GLOBAL_ENABLE_STEALTH=${STEALTH_INPUT:-N}
 }
 
@@ -862,6 +862,7 @@ while true; do
             systemctl list-timers --all | grep -E "xray-acme|xray-dat" || echo "当前未匹配到关联调度实例"
             echo -e "\n${C_BLUE}--- ACME 证书守护程序信息 ---${C_RESET}"
             [[ -f "/root/.acme.sh/acme.sh" ]] && /root/.acme.sh/acme.sh --cron --home "/root/.acme.sh"
+            echo ""
             read -rp "按回车键返回主菜单..." ;;
         0) echo "释放连接控制，脚本正常终止。"; exit 0 ;;
         *) echo "无效操作域捕获，拒绝执行。" ; sleep 1 ;;

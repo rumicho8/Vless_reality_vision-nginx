@@ -14,7 +14,7 @@ fi
 # =========================================================
 # 模块 0：全局常量与环境变量初始化
 # =========================================================
-readonly SCRIPT_VERSION="Pro Final V1 (Stability Edition)"
+readonly SCRIPT_VERSION="Pro Final V2 (Stealth Master Edition)"
 readonly LOG_FILE="/dev/null"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"
@@ -67,7 +67,7 @@ log_err()  { echo -e "${C_RED}[ERROR]${C_RESET} $1" | tee -a "$LOG_FILE"; exit 1
 module_prepare_env() {
     log_info "正在创建系统必备目录并配置日志策略..."
 
-    # --- 修复：限制系统日志大小为 100M 且保留时长为 7 天 ---
+    # --- 限制系统日志大小为 100M 且保留时长为 7 天 ---
     mkdir -p /etc/systemd/journald.conf.d/
     echo -e "[Journal]\nSystemMaxUse=100M\nMaxRetentionSec=7day\nForwardToSyslog=no" > /etc/systemd/journald.conf.d/99-prophet.conf
     systemctl restart systemd-journald || true
@@ -215,8 +215,8 @@ except:
     fi
 
     echo -e "\n${C_YELLOW}--- 系统安全审计策略 (Stealth Mode) ---${C_RESET}"
-    echo -e "激活后，每次退出 SSH 会话将自动触发以下清理操作：\n 1. 清除当前用户的历史命令缓冲区\n 2. 截断系统日志及访问授权记录\n ${C_RED}安全提示：此策略将限制常规故障排查能力，仅适用于高隐私环境。${C_RESET}"
-    read -rp "是否启用 Stealth Mode 审计拦截？[y/N, 默认 N]: " STEALTH_INPUT
+    echo -e "激活后将启用系统级 SSH 接管引擎：\n 1. 彻底清除真实用户的命令历史缓冲区\n 2. 抹除 wtmp/btmp/lastlog 等系统登录账本\n ${C_RED}安全提示：此策略为系统级强制拦截，将限制常规审计排查能力。${C_RESET}"
+    read -rp "是否启用 Stealth Mode 极客无痕模式？[y/N, 默认 N]: " STEALTH_INPUT
     GLOBAL_ENABLE_STEALTH=${STEALTH_INPUT:-N}
 }
 
@@ -229,7 +229,7 @@ get_listen_port() {
             continue
         fi
         
-        # --- 修复 1：硬性排他检查，防止占用 Nginx 保留端口 ---
+        # --- 硬性排他检查，防止占用 Nginx 保留端口 ---
         if [[ "$GLOBAL_INSTALL_MODE" == "1" ]] && { [ "$GLOBAL_PORT" -eq 80 ] || [ "$GLOBAL_PORT" -eq 8443 ]; }; then
             log_warn "模式 1 下，端口 80 和 8443 已被 Nginx 系统保留，请更换其他端口。"
             continue
@@ -484,7 +484,7 @@ module_config_xray() {
         SID=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0]' "$XRAY_CONFIG" 2>/dev/null)
     fi
     
-    # --- 修复 2：使用 Xray 内置命令生成 UUID (剔除 Python3 隐性依赖) ---
+    # --- 使用 Xray 内置命令生成 UUID ---
     [[ -z "$UUID" || "$UUID" == "null" ]] && UUID=$($XRAY_BIN uuid)
     [[ -z "$SID" || "$SID" == "null" ]] && SID=$(openssl rand -hex 8)
     
@@ -655,30 +655,91 @@ EOF
 }
 
 # =========================================================
-# 模块 8：无痕模式 (退出 SSH 时清理痕迹)
+# 模块 8：无痕模式 (SSH ForceCommand 级别接管)
 # =========================================================
 module_setup_stealth() {
     case "${GLOBAL_ENABLE_STEALTH}" in
         [yY][eE][sS]|[yY])
-            log_info "正在配置无痕模式 (退出自动清理日志)..."
-            local TRAP_CODE="
-# === 退出 SSH 自动清理日志 ===
-cleanup_on_exit() {
-    if [ -n \"\$SSH_CLIENT\" ] || [ -n \"\$SSH_TTY\" ]; then
-        cd / >/dev/null 2>&1; history -c; rm -f \$HOME/.bash_history
-        local SUDO_CMD=\"\"; command -v sudo >/dev/null 2>&1 && SUDO_CMD=\"sudo\"
-        \$SUDO_CMD journalctl --rotate >/dev/null 2>&1
-        \$SUDO_CMD journalctl --vacuum-time=1s >/dev/null 2>&1
-        [ -f /var/log/auth.log ] && \$SUDO_CMD truncate -s 0 /var/log/auth.log >/dev/null 2>&1
-    fi
-}
-trap cleanup_on_exit EXIT SIGHUP"
-            for target_rc in "/root/.bashrc" "/home/admin/.bashrc"; do
-                if [[ -f "$target_rc" ]] && ! grep -q "cleanup_on_exit" "$target_rc"; then
-                    echo "$TRAP_CODE" >> "$target_rc"; [[ "$target_rc" == "/home/admin/.bashrc" ]] && chown admin:admin "$target_rc"
-                fi
-            done
-            log_ok "无痕模式配置成功。"
+            log_info "正在注入系统级 SSH 强力清痕引擎 (ForceCommand)..."
+
+            # -----------------------------
+            # 清理脚本（优化版）
+            # -----------------------------
+            cat >/usr/local/bin/ssh_session_clean <<'EOF'
+#!/bin/bash
+
+# 只处理真实用户
+for u in $(awk -F: '$3 >= 1000 && $7 !~ /(nologin|false)/ {print $1}' /etc/passwd); do
+    home=$(getent passwd "$u" | cut -d: -f6)
+    [ -d "$home" ] && rm -f "$home/.bash_history" "$home/.zsh_history" 2>/dev/null
+done
+
+history -c 2>/dev/null
+
+# 日志
+journalctl --rotate >/dev/null 2>&1
+journalctl --vacuum-time=1s >/dev/null 2>&1
+
+[ -f /var/log/auth.log ] && truncate -s 0 /var/log/auth.log
+[ -f /var/log/secure ] && truncate -s 0 /var/log/secure
+
+truncate -s 0 /var/log/wtmp
+truncate -s 0 /var/log/btmp
+truncate -s 0 /var/log/lastlog
+
+exit 0
+EOF
+            chmod 700 /usr/local/bin/ssh_session_clean
+
+            # -----------------------------
+            # wrapper（修正空格 Bug 版）
+            # -----------------------------
+            cat >/usr/local/bin/ssh_wrapper <<'EOF'
+#!/bin/bash
+
+USER_SHELL=$(getent passwd "$USER" | cut -d: -f7)
+USER_SHELL=${USER_SHELL:-/bin/bash}
+
+EXIT_STATUS=0
+
+if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
+    case "$SSH_ORIGINAL_COMMAND" in
+        scp*|rsync*|sftp*)
+            # 修复：加上 eval 以防止含空格的文件路径在 exec 时被意外拆分
+            eval "exec $SSH_ORIGINAL_COMMAND"
+            ;;
+        *)
+            bash -c "$SSH_ORIGINAL_COMMAND"
+            EXIT_STATUS=$?
+            ;;
+    esac
+else
+    "$USER_SHELL"
+    EXIT_STATUS=$?
+fi
+
+/usr/local/bin/ssh_session_clean >/dev/null 2>&1
+
+exit $EXIT_STATUS
+EOF
+            chmod 755 /usr/local/bin/ssh_wrapper
+
+            # -----------------------------
+            # ssh 配置（稳写）
+            # -----------------------------
+            local SSHD=/etc/ssh/sshd_config
+
+            grep -q "ForceCommand /usr/local/bin/ssh_wrapper" "$SSHD" || \
+            echo "ForceCommand /usr/local/bin/ssh_wrapper" >> "$SSHD"
+
+            if grep -q "^LogLevel" "$SSHD"; then
+                sed -i 's/^LogLevel.*/LogLevel ERROR/' "$SSHD"
+            else
+                echo "LogLevel ERROR" >> "$SSHD"
+            fi
+
+            systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+            log_ok "SSH 强力无痕模式已全局配置成功。"
             ;;
         *) log_info "未启用无痕模式，跳过。" ;;
     esac
@@ -773,15 +834,22 @@ while true; do
             rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
             rm -rf /var/www/html/{*,.[!.]*,..?*} "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh 2>/dev/null
             crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
-            sed -i '/# === 退出 SSH 自动清理日志 ===/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
-            [[ -f /home/admin/.bashrc ]] && sed -i '/# === 退出 SSH 自动清理日志 ===/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null
+            
+            # --- SSH ForceCommand 相关清理与还原 (已修复 local 报错) ---
+            SSHD_CONF="/etc/ssh/sshd_config"
+            if [ -f "$SSHD_CONF" ]; then
+                sed -i '/ForceCommand \/usr\/local\/bin\/ssh_wrapper/d' "$SSHD_CONF"
+                sed -i 's/^LogLevel ERROR/#LogLevel INFO/' "$SSHD_CONF"
+                systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+            fi
+            rm -f /usr/local/bin/ssh_wrapper /usr/local/bin/ssh_session_clean
+            
             echo -e "\n${C_YELLOW}业务文件清理完毕。${C_RESET}"
             echo -e "${C_RED}是否申请扩大清理范围，执行【底层依赖物理销毁】？${C_RESET}"
             read -rp "如主机存在复用应用逻辑，请回绝该申请！[y/N, 默认 N]: " SCORCHED_EARTH
             case "${SCORCHED_EARTH}" in
                 [yY][eE][sS]|[yY])
                     log_info "正在卸载基础依赖包 (nginx, socat 等)..."
-                    # --- 修复 3：移除 cron，防止误杀系统原生调度 ---
                     apt-get purge -yqq nginx nginx-common socat qrencode jq >/dev/null 2>&1
                     apt-get autoremove -yqq >/dev/null 2>&1; apt-get clean >/dev/null 2>&1
                     log_ok "基础依赖包卸载成功。" ;;

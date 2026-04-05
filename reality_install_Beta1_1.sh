@@ -357,6 +357,14 @@ EOF
 
     log_info "正在配置 Nginx 伪装网站和安全策略..."
     rm -f /etc/nginx/sites-enabled/default
+    # --- Nginx 版本检测探针 (低于 1.19.4 直接报错退出) ---
+    local NGINX_VER
+    NGINX_VER=$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    
+    if [ "$(printf '%s\n' "1.19.4" "$NGINX_VER" | sort -V | head -n1)" != "1.19.4" ]; then
+        log_err "Nginx 配置失败：当前版本 ($NGINX_VER) 过低。ssl_reject_handshake 策略需要 Nginx 1.19.4 或更高版本，请升级您的系统软件源或 Nginx。"
+    fi
+    # ----------------------------------------------------
     
     local tmp_conf="/tmp/xray_nginx.conf"
     # 原理说明：

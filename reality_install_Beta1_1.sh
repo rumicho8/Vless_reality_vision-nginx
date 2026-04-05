@@ -225,17 +225,17 @@ module_prepare_env() {
     apt-get update -yqq >/dev/null 2>&1
     
     local common_deps="curl unzip openssl jq qrencode"
-    local check_deps=("curl" "jq" "openssl")
+    local check_deps=("curl" "unzip" "openssl" "jq" "qrencode")
 
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
         log_info "正在安装模式 1 所需的基础软件 (Nginx, Socat, cron)..."
-        apt-get install -yqq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+        apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
             $common_deps nginx socat cron >/dev/null 2>&1
-        check_deps+=("nginx")
+        check_deps+=("nginx" "socat" "crontab")
         mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl /var/www/html
     else
         log_info "正在安装模式 2 所需的基础软件..."
-        apt-get install -yqq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+        apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
             $common_deps >/dev/null 2>&1
     fi
         

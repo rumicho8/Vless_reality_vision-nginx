@@ -224,11 +224,11 @@ module_prepare_env() {
     rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
     apt-get update -yqq >/dev/null 2>&1
     
-    local common_deps="curl unzip openssl jq tar qrencode"
+    local common_deps="curl unzip openssl jq qrencode"
     local check_deps=("curl" "jq" "openssl")
 
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
-        log_info "正在安装模式 1 所需的基础软件 (Nginx, Socat 等)..."
+        log_info "正在安装模式 1 所需的基础软件 (Nginx, Socat, cron)..."
         apt-get install -yqq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
             $common_deps nginx socat cron >/dev/null 2>&1
         check_deps+=("nginx")
@@ -766,12 +766,12 @@ while true; do
             sed -i '/# === 退出 SSH 自动清理日志 ===/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
             [[ -f /home/admin/.bashrc ]] && sed -i '/# === 退出 SSH 自动清理日志 ===/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null
             
-            echo -e "\n${C_YELLOW}文件清理完毕。${C_RESET}"
-            echo -e "${C_RED}[WARN] 是否连带卸载底层系统软件 (Nginx, Socat 等)？${C_RESET}"
+            echo -e "\n${C_YELLOW}文件清理完毕。(注：已为您保留 BBR 网络加速与日志限制最大100M，保留7天策略)${C_RESET}"
+            echo -e "${C_RED}[WARN] 是否连带卸载底层系统软件 (Nginx, Socat, qrencode, jq)？${C_RESET}"
             read -rp "如果你的服务器上还跑了别的网站或程序，请选 N！[y/N, 默认 N]: " SCORCHED_EARTH
             case "${SCORCHED_EARTH}" in
                 [yY][eE][sS]|[yY])
-                    log_info "正在卸载基础软件 (Nginx, Socat 等)..."
+                    log_info "正在卸载基础软件 (Nginx, Socat, qrencode, jq)..."
                     apt-get purge -yqq nginx nginx-common socat qrencode jq >/dev/null 2>&1
                     apt-get autoremove -yqq >/dev/null 2>&1; apt-get clean >/dev/null 2>&1
                     log_ok "基础软件卸载完毕。" ;;

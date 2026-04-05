@@ -72,7 +72,7 @@ get_listen_port() {
             continue
         fi
         
-        if ss -tuln 2>/dev/null | grep -q ":$GLOBAL_PORT "; then
+        if ss -tuln 2>/dev/null | grep -qE ":${GLOBAL_PORT}\b"; then
             log_warn "端口占用：端口 $GLOBAL_PORT 已被其他程序占用，请重新分配。"
         else
             log_ok "端口 $GLOBAL_PORT 可以使用。\n"
@@ -294,7 +294,7 @@ module_issue_cert() {
         # 因此在 hook 阶段必须接管 Nginx 的生命周期，避免本地端口竞争导致鉴权失败。
         if [[ "$api" == "standalone" ]]; then
             command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1
-            "$acme_bin" --issue -d "$domain" -d "www.$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"
+            "$acme_bin" --issue -d "$domain" -d "www.$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE --pre-hook "systemctl stop nginx || true" --post-hook "systemctl start nginx || true"
         else
             "$acme_bin" --issue --dns "$api" -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE
         fi

@@ -539,6 +539,21 @@ module_config_xray() {
     cat > "$XRAY_CONFIG" <<EOF
 {
   "log": { "loglevel": "warning" },
+  "dns": {
+  "queryStrategy": "UseIPv4",
+  "disableFallback": true,
+  "hosts": {
+    "dns.google": ["8.8.8.8", "8.8.4.4"]
+  },
+  "servers": [
+    { "address": "https://1.1.1.1/dns-query" },
+    { "address": "https://1.0.0.1/dns-query" },
+    { 
+      "address": "https://dns.google/dns-query", 
+      "skipFallback": true 
+    }
+  ]
+},
   "inbounds": [{
     "port": $GLOBAL_PORT,
     "protocol": "vless",

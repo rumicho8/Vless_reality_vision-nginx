@@ -660,7 +660,7 @@ update_f() {
 update_f "geoip.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 update_f "geosite.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 if [[ $changed -eq 1 ]]; then
-    systemctl reload xray 2>/dev/null || systemctl restart xray >/dev/null 2>&1
+    systemctl restart xray >/dev/null 2>&1
 fi
 EOF
     chmod +x "$SCRIPT_DIR/update-dat.sh"

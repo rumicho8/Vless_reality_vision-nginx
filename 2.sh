@@ -45,7 +45,6 @@ GLOBAL_CF_ZONE_ID=""
 GLOBAL_NAMESILO_KEY=""
 GLOBAL_CERT_MODE=""
 GLOBAL_PORT=""
-GLOBAL_ENABLE_STEALTH="N"
 
 CLEANUP_LIST=()
 trap '[[ ${#CLEANUP_LIST[@]} -gt 0 ]] && rm -rf "${CLEANUP_LIST[@]}" 2>/dev/null' EXIT SIGHUP SIGINT SIGTERM
@@ -82,7 +81,7 @@ get_listen_port() {
 }
 
 module_get_inputs() {
-    echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 1/4] 选择部署模式 ---${C_RESET}"
+    echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 1/3] 选择部署模式 ---${C_RESET}"
     echo -e "  1. Web 回落模式 (推荐) - 自动申请证书 + 搭建本地伪装网站，极其稳定安全。"
     echo -e "  2. 纯净直连模式        - 借用大厂域名 (如 Apple) 伪装，不需要自己的域名，简单轻量。"
     read -rp "请选择 [1/2, 默认 1]: " MODE_INPUT
@@ -130,7 +129,7 @@ except:
 
         get_listen_port
         
-        echo -e "${C_BOLD}${C_BLUE}--- [步骤 2/4] 选择证书验证方式 ---${C_RESET}"
+        echo -e "${C_BOLD}${C_BLUE}--- [步骤 2/3] 选择证书验证方式 ---${C_RESET}"
         echo -e "  1. DNS API 验证机制 (推荐) - 后台静默验证，支持泛域名，无惧端口被封。"
         echo -e "  2. HTTP Standalone 机制    - 需要暂时占用本地 Web 端口进行验证。"
         read -rp "请选择 [1/2, 默认 1]: " VERIFY_TYPE
@@ -153,7 +152,7 @@ except:
             fi
         fi
 
-        echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 3/4] 选择证书申请环境 ---${C_RESET}"
+        echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 3/3] 选择证书申请环境 ---${C_RESET}"
         echo -e "  1. Production (生产环境) - 颁发浏览器信任的正规证书 (注意有申请次数限制)。"
         echo -e "  2. Staging    (测试环境) - 无次数限制，专用于测试部署流程是否通畅。"
         read -rp "请选择 [1/2, 默认 1]: " CERT_MODE_INPUT
@@ -174,14 +173,6 @@ except:
         GLOBAL_PUBLIC_SNI=$(echo "$GLOBAL_PUBLIC_SNI" | sed 's/^https:\/\///g' | sed 's/^http:\/\///g' | sed 's/\/$//g' | tr -d '[:space:]')
         get_listen_port
     fi
-
-    echo -e "\n${C_BOLD}${C_BLUE}--- 最后一项：终端无痕模式 (Stealth Mode) ---${C_RESET}"
-    echo -e "  启用此功能后，每次退出 SSH 连接时，系统会自动执行以下清理工作："
-    echo -e "  1. 抹除当前用户的命令历史记录 (history)。"
-    echo -e "  2. 清空系统登录日志和授权记录 (/var/log/auth.log 等)。"
-    echo -e "  ${C_RED}[注意] 此功能会影响正常的系统排错，仅限对隐私有极高要求的场景使用。${C_RESET}"
-    read -rp "是否启用无痕模式？[y/N, 默认 N]: " STEALTH_INPUT
-    GLOBAL_ENABLE_STEALTH=${STEALTH_INPUT:-N}
 }
 
 module_show_result() {
@@ -251,30 +242,44 @@ module_prepare_env() {
 
 module_setup_bbr() {
     log_info "正在检查网络加速 (BBR) 状态..."
-    if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
-        local bbr_conf_file="/etc/sysctl.conf"
+    
+    local bbr_conf_file="/etc/sysctl.conf"
+    local os_info="未知系统"
+    
+    # 判断 Debian 版本分配 BBR 配置文件
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        os_info="${PRETTY_NAME:-"$ID $VERSION_ID"}"
         
-        # 判断 Debian 版本分配 BBR 配置文件
-        if [[ -f /etc/os-release ]]; then
-            . /etc/os-release
-            if [[ "$ID" == "debian" ]] && [[ "$VERSION_ID" =~ ^[0-9]+$ ]] && [ "$VERSION_ID" -ge 13 ]; then
-                bbr_conf_file="/etc/sysctl.d/99-custom.conf"
-                mkdir -p /etc/sysctl.d
-            fi
+        # 提取大版本号，兼容带小数点的情况 (如 13.1 -> 13)
+        local major_version="${VERSION_ID%%.*}"
+        if [[ "$ID" == "debian" ]] && [[ "$major_version" =~ ^[0-9]+$ ]] && [ "$major_version" -ge 13 ]; then
+            bbr_conf_file="/etc/sysctl.d/99-custom.conf"
+            mkdir -p /etc/sysctl.d
+            
+            # 防止旧版系统升级上来时，旧配置文件残留冲突
+            sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null || true
+            sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null || true
         fi
+    fi
 
+    log_info "当前系统信息: ${C_YELLOW}${os_info}${C_RESET} | 目标配置路径: ${C_YELLOW}${bbr_conf_file}${C_RESET}"
+
+    if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
+        # 清理目标文件旧配置并写入新配置
         sed -i '/net.core.default_qdisc/d' "$bbr_conf_file" 2>/dev/null || true
         sed -i '/net.ipv4.tcp_congestion_control/d' "$bbr_conf_file" 2>/dev/null || true
         echo "net.core.default_qdisc=fq" >> "$bbr_conf_file"
         echo "net.ipv4.tcp_congestion_control=bbr" >> "$bbr_conf_file"
         
+        # 应用配置
         if [[ "$bbr_conf_file" == "/etc/sysctl.conf" ]]; then
             sysctl -p >/dev/null 2>&1
         else
             sysctl --system >/dev/null 2>&1
         fi
         
-        log_ok "BBR 网络加速已成功开启 (配置文件: $bbr_conf_file)。"
+        log_ok "BBR 网络加速已成功开启。"
     else
         log_ok "网络加速 (BBR) 已处于开启状态，跳过配置。"
     fi
@@ -374,19 +379,25 @@ EOF
 
     log_info "正在配置 Nginx 伪装网站和安全策略..."
     rm -f /etc/nginx/sites-enabled/default
-    # --- Nginx 版本检测探针 (低于 1.19.4 直接报错退出) ---
+    
+    # --- Nginx 版本检测探针 ---
     local NGINX_VER
     NGINX_VER=$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    log_info "当前 Nginx 版本: ${C_YELLOW}${NGINX_VER}${C_RESET}"
     
-    if [ "$(printf '%s\n' "1.19.4" "$NGINX_VER" | sort -V | head -n1)" != "1.19.4" ]; then
-        log_err "Nginx 配置失败：当前版本 ($NGINX_VER) 过低。ssl_reject_handshake 策略需要 Nginx 1.19.4 或更高版本，请升级您的系统软件源或 Nginx。"
+    local reject_handshake="ssl_reject_handshake on;"
+    if [ "$(printf '%s\n' "1.22.0" "$NGINX_VER" | sort -V | head -n1)" != "1.22.0" ]; then
+        reject_handshake=""
+        log_warn "触发兼容模式: Nginx 版本 < 1.22.0，已跳过 ssl_reject_handshake 策略。"
+    else
+        log_info "安全策略验证: 已启用 ssl_reject_handshake 抵御 SNI 探测。"
     fi
     
-    # --- 适配 Nginx 版本对 http2 的声明规则 ---
-    local nginx_listen_directive="listen 127.0.0.1:8443 ssl http2;"
+    local listen_directive="listen 127.0.0.1:8443 ssl http2;"
     if [ "$(printf '%s\n' "1.25.1" "$NGINX_VER" | sort -V | head -n1)" == "1.25.1" ]; then
-        nginx_listen_directive="listen 127.0.0.1:8443 ssl;
+        listen_directive="listen 127.0.0.1:8443 ssl;
     http2 on;"
+        log_info "协议语法适配: 版本 >= 1.25.1，已启用独立 http2 指令块。"
     fi
     # ----------------------------------------------------
     
@@ -398,10 +409,10 @@ EOF
 server {
     listen 127.0.0.1:8443 ssl default_server;
     server_name _;
-    ssl_reject_handshake on;
+    ${reject_handshake}
 }
 server {
-    $nginx_listen_directive
+    ${listen_directive}
     ssl_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
     server_name $domain www.$domain;
@@ -624,7 +635,7 @@ EOF
 }
 
 # ==============================================================================
-# GROUP 6: 审计清痕与自动化守护 (Automation, Stealth Mode & Cleanup)
+# GROUP 6: 自动化守护与系统清理 (Automation & Cleanup)
 # ==============================================================================
 module_setup_automation() {
     log_info "正在配置自动更新任务..."
@@ -718,36 +729,6 @@ EOF
     log_ok "自动更新任务配置完成。"
 }
 
-module_setup_stealth() {
-    case "${GLOBAL_ENABLE_STEALTH}" in
-        [yY][eE][sS]|[yY])
-            log_info "正在配置无痕模式拦截器..."
-            # 原理说明：
-            # 利用 bash内置的 trap 指令拦截 SIGHUP (终端断开) 和 EXIT (正常退出) 信号。
-            # 在触发退出时，系统会优先执行注入的这段截断逻辑，从而实现“阅后即焚”的清痕效果。
-            local TRAP_CODE="
-# === 退出 SSH 自动清理日志 ===
-cleanup_on_exit() {
-    if [ -n \"\$SSH_CLIENT\" ] || [ -n \"\$SSH_TTY\" ]; then
-        cd / >/dev/null 2>&1; history -c; rm -f \$HOME/.bash_history
-        local SUDO_CMD=\"\"; command -v sudo >/dev/null 2>&1 && SUDO_CMD=\"sudo\"
-        \$SUDO_CMD journalctl --rotate >/dev/null 2>&1
-        \$SUDO_CMD journalctl --vacuum-time=1s >/dev/null 2>&1
-        [ -f /var/log/auth.log ] && \$SUDO_CMD truncate -s 0 /var/log/auth.log >/dev/null 2>&1
-    fi
-}
-trap cleanup_on_exit EXIT SIGHUP"
-            for target_rc in "/root/.bashrc" "/home/admin/.bashrc"; do
-                if [[ -f "$target_rc" ]] && ! grep -q "cleanup_on_exit" "$target_rc"; then
-                    echo "$TRAP_CODE" >> "$target_rc"; [[ "$target_rc" == "/home/admin/.bashrc" ]] && chown admin:admin "$target_rc"
-                fi
-            done
-            log_ok "无痕模式配置成功。"
-            ;;
-        *) log_info "未启用无痕模式，跳过配置。" ;;
-    esac
-}
-
 module_cleanup() {
     log_info "正在清理安装过程中产生的系统垃圾..."
     apt-get autoremove -yqq >/dev/null 2>&1; apt-get clean -yqq >/dev/null 2>&1
@@ -781,7 +762,6 @@ main_install() {
     module_install_xray_core
     module_config_xray "$GLOBAL_DOMAIN"
     module_setup_automation
-    module_setup_stealth
     module_cleanup
     module_show_result
 }
@@ -811,8 +791,6 @@ while true; do
             rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
             rm -rf /var/www/html/{*,.[!.]*,..?*} "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh 2>/dev/null
             crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
-            sed -i '/# === 退出 SSH 自动清理日志 ===/,/trap cleanup_on_exit EXIT SIGHUP/d' /root/.bashrc 2>/dev/null
-            [[ -f /home/admin/.bashrc ]] && sed -i '/# === 退出 SSH 自动清理日志 ===/,/trap cleanup_on_exit EXIT SIGHUP/d' /home/admin/.bashrc 2>/dev/null
             
             echo -e "\n${C_YELLOW}文件清理完毕。(注：已为您保留 BBR 网络加速与日志限制最大100M，保留7天策略)${C_RESET}"
             echo -e "${C_RED}[WARN] 是否连带卸载底层系统软件 (Nginx, Socat, qrencode, jq)？${C_RESET}"

@@ -89,7 +89,7 @@ module_get_inputs() {
 
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
         read -rp "请输入已解析到本服务器的域名 (例如 my.domain.com): " GLOBAL_DOMAIN
-        GLOBAL_DOMAIN=$(echo "$GLOBAL_DOMAIN" | sed 's/^www\.//g' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        GLOBAL_DOMAIN=$(echo "$GLOBAL_DOMAIN" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
         
         [[ -z "$GLOBAL_DOMAIN" ]] && log_err "域名不能为空或格式错误。"
         
@@ -219,10 +219,10 @@ module_prepare_env() {
     local check_deps=("curl" "unzip" "openssl" "jq" "qrencode")
 
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
-        log_info "正在安装模式 1 所需的基础软件 (Nginx, Socat, cron)..."
+        log_info "正在安装模式 1 所需的基础软件 (Nginx, Socat)..."
         apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-            $common_deps nginx socat cron >/dev/null 2>&1
-        check_deps+=("nginx" "socat" "crontab")
+            $common_deps nginx socat >/dev/null 2>&1
+        check_deps+=("nginx" "socat")
         mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl /var/www/html
     else
         log_info "正在安装模式 2 所需的基础软件..."
@@ -304,7 +304,7 @@ module_issue_cert() {
         cd "$tmp_acme" || log_err "创建临时工作目录失败。"
         
         echo -e "${C_BLUE}--- 开始申请证书 ---${C_RESET}"
-        if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}" && [[ -s "$acme_bin" ]]; then
+        if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}" --nocron && [[ -s "$acme_bin" ]]; then
             log_ok "证书申请工具 (ACME) 安装成功。"
             "$acme_bin" --upgrade --auto-upgrade "$AUTO_UPGRADE" >/dev/null 2>&1
         else
@@ -316,9 +316,9 @@ module_issue_cert() {
         # 因此在 hook 阶段必须接管 Nginx 的生命周期，避免本地端口竞争导致鉴权失败。
         if [[ "$api" == "standalone" ]]; then
             command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1
-            "$acme_bin" --issue -d "$domain" -d "www.$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE --pre-hook "systemctl stop nginx || true" --post-hook "systemctl start nginx || true"
+            "$acme_bin" --issue -d "$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE --pre-hook "systemctl stop nginx || true" --post-hook "systemctl start nginx || true"
         else
-            "$acme_bin" --issue --dns "$api" -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE
+            "$acme_bin" --issue --dns "$api" -d "$domain" --keylength ec-256 $GLOBAL_CERT_MODE
         fi
         
         "$acme_bin" --install-cert -d "$domain" --ecc \
@@ -415,7 +415,7 @@ server {
     ${listen_directive}
     ssl_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
-    server_name $domain www.$domain;
+    server_name $domain;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff;
     add_header Referrer-Policy strict-origin-when-cross-origin;
@@ -429,7 +429,7 @@ server {
 server {
     listen 80;
     listen [::]:80;
-    server_name $domain www.$domain;
+    server_name $domain;
     return 301 https://\$host\$request_uri;
 }
 EOF
@@ -568,7 +568,7 @@ module_config_xray() {
     log_ok "安全加密密钥生成成功。"
     
     mkdir -p "$XRAY_CONF_DIR"
-    local dest_addr="127.0.0.1:8443"; local server_names_json="[\"$domain\", \"www.$domain\"]"
+    local dest_addr="127.0.0.1:8443"; local server_names_json="[\"$domain\"]"
     [[ "$GLOBAL_INSTALL_MODE" == "2" ]] && { dest_addr="$GLOBAL_PUBLIC_SNI:443"; server_names_json="[\"$GLOBAL_PUBLIC_SNI\"]"; }
     
     cat > "$XRAY_CONFIG" <<EOF
@@ -668,8 +668,6 @@ EOF
     echo -e "${C_BLUE}--- 路由分流资源热同步 ---${C_RESET}"
     bash "$SCRIPT_DIR/update-dat.sh" 2>&1 | tee -a "$LOG_FILE"
     echo -e "${C_BLUE}--------------------------${C_RESET}"
-
-    crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
 
     cat > /etc/systemd/system/xray-dat.service <<EOF
 [Unit]
@@ -790,7 +788,6 @@ while true; do
             systemctl daemon-reload
             rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
             rm -rf /var/www/html/{*,.[!.]*,..?*} "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh 2>/dev/null
-            crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
             
             echo -e "\n${C_YELLOW}文件清理完毕。(注：已为您保留 BBR 网络加速与日志限制最大100M，保留7天策略)${C_RESET}"
             echo -e "${C_RED}[WARN] 是否连带卸载底层系统软件 (Nginx, Socat, qrencode, jq)？${C_RESET}"

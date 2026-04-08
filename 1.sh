@@ -221,7 +221,7 @@ module_prepare_env() {
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
         log_info "正在安装模式 1 所需的基础软件 (Nginx, Socat)..."
         apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-            $common_deps nginx socat cron >/dev/null 2>&1
+            $common_deps nginx socat >/dev/null 2>&1
         check_deps+=("nginx" "socat")
         mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl /var/www/html
     else

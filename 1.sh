@@ -219,10 +219,10 @@ module_prepare_env() {
     local check_deps=("curl" "unzip" "openssl" "jq" "qrencode")
 
     if [[ "$GLOBAL_INSTALL_MODE" == "1" ]]; then
-        log_info "正在安装模式 1 所需的基础软件 (Nginx, Socat, cron)..."
+        log_info "正在安装模式 1 所需的基础软件 (Nginx, Socat)..."
         apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
             $common_deps nginx socat cron >/dev/null 2>&1
-        check_deps+=("nginx" "socat" "crontab")
+        check_deps+=("nginx" "socat")
         mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl /var/www/html
     else
         log_info "正在安装模式 2 所需的基础软件..."
@@ -236,7 +236,7 @@ module_prepare_env() {
         fi
     done
     
-    mkdir -p "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /usr/local/bin /var/tmp
+    mkdir -p "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /usr/local/bin
     log_ok "基础软件及目录准备完毕。"
 }
 
@@ -297,15 +297,14 @@ module_issue_cert() {
     if [[ ! -s "$cert_file" ]]; then
         log_info "正在向 Let's Encrypt 申请 TLS 证书 ($domain)..."
         
-        # 将工作目录转移至基于硬盘的 /var/tmp 避开 Debian 13 的内存盘限制
-        local tmp_acme="/var/tmp/acme_$(date +%s)"
+        local tmp_acme="/tmp/acme_$(date +%s)"
         CLEANUP_LIST+=("$tmp_acme")
         mkdir -p "$tmp_acme"
         
         cd "$tmp_acme" || log_err "创建临时工作目录失败。"
         
         echo -e "${C_BLUE}--- 开始申请证书 ---${C_RESET}"
-        if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}" && [[ -s "$acme_bin" ]]; then
+        if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}" --nocron && [[ -s "$acme_bin" ]]; then
             log_ok "证书申请工具 (ACME) 安装成功。"
             "$acme_bin" --upgrade --auto-upgrade "$AUTO_UPGRADE" >/dev/null 2>&1
         else
@@ -402,7 +401,7 @@ EOF
     fi
     # ----------------------------------------------------
     
-    local tmp_conf="/var/tmp/xray_nginx.conf"
+    local tmp_conf="/tmp/xray_nginx.conf"
     # 原理说明：
     # 1. default_server + ssl_reject_handshake 抵御无 SNI 的恶意探测。
     # 2. Xray Reality 握手失败/普通 HTTP 请求，将被 Xray 透明回落至 127.0.0.1:8443 (即此处的 Nginx 伪装站)。
@@ -445,18 +444,18 @@ EOF
 
     log_info "正在下载伪装网页文件..."
     local target_dir="/var/www/html"
-    local temp_extract="/var/tmp/web_temp_$(date +%s)"
-    CLEANUP_LIST+=("$temp_extract" "/var/tmp/web_template.zip")
+    local temp_extract="/tmp/web_temp_$(date +%s)"
+    CLEANUP_LIST+=("$temp_extract" "/tmp/web_template.zip")
     mkdir -p "$target_dir"
 
     rm -rf "${target_dir:?}/"* "${target_dir:?}/".[!.]* "${target_dir:?}/"..?* 2>/dev/null
 
     echo -e "${C_BLUE}--- 解压伪装网页 ---${C_RESET}"
     if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused --max-time 120 \
-   -o /var/tmp/web_template.zip "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main" \
-   && [[ -s /var/tmp/web_template.zip ]]; then
+   -o /tmp/web_template.zip "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main" \
+   && [[ -s /tmp/web_template.zip ]]; then
         mkdir -p "$temp_extract"
-        if unzip -qo /var/tmp/web_template.zip -d "$temp_extract"; then
+        if unzip -qo /tmp/web_template.zip -d "$temp_extract"; then
             inner_dir=$(find "$temp_extract" -mindepth 1 -maxdepth 1 -type d | head -n1)
             [[ -d "$inner_dir" ]] || log_err "压缩包格式不正确。"
             cp -a "$inner_dir"/. "$target_dir/" 2>/dev/null
@@ -491,7 +490,7 @@ module_install_xray_core() {
     arch=$(dpkg --print-architecture)
     [[ "$arch" == "amd64" ]] && local arch_xray="64" || local arch_xray="arm64-v8a"
     
-    local tmp_xray="/var/tmp/xray_build"
+    local tmp_xray="/tmp/xray_build"
     CLEANUP_LIST+=("$tmp_xray")
     mkdir -p "$tmp_xray" && cd "$tmp_xray"
     
@@ -661,7 +660,7 @@ update_f() {
 update_f "geoip.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 update_f "geosite.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 if [[ $changed -eq 1 ]]; then
-    systemctl reload xray 2>/dev/null || systemctl restart xray >/dev/null 2>&1
+    systemctl restart xray >/dev/null 2>&1
 fi
 EOF
     chmod +x "$SCRIPT_DIR/update-dat.sh"
@@ -669,8 +668,6 @@ EOF
     echo -e "${C_BLUE}--- 路由分流资源热同步 ---${C_RESET}"
     bash "$SCRIPT_DIR/update-dat.sh" 2>&1 | tee -a "$LOG_FILE"
     echo -e "${C_BLUE}--------------------------${C_RESET}"
-
-    crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
 
     cat > /etc/systemd/system/xray-dat.service <<EOF
 [Unit]
@@ -791,7 +788,6 @@ while true; do
             systemctl daemon-reload
             rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
             rm -rf /var/www/html/{*,.[!.]*,..?*} "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/nginx/ssl /root/.acme.sh 2>/dev/null
-            crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
             
             echo -e "\n${C_YELLOW}文件清理完毕。(注：已为您保留 BBR 网络加速与日志限制最大100M，保留7天策略)${C_RESET}"
             echo -e "${C_RED}[WARN] 是否连带卸载底层系统软件 (Nginx, Socat, qrencode, jq)？${C_RESET}"

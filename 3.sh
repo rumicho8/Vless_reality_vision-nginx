@@ -646,12 +646,15 @@ module_install_hysteria() {
     local hy2_url="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy2_arch}"
     
     echo -e "${C_BLUE}--- 下载 Hysteria2 核心 ---${C_RESET}"
-    curl -fL -# -o /usr/local/bin/hysteria "$hy2_url" || log_err "Hysteria2 下载失败"
-    chmod +x /usr/local/bin/hysteria
+    curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 120 \
+          -o /usr/local/bin/hysteria "$hy2_url" \
+          && [[ -s /usr/local/bin/hysteria ]] \
+          && chmod +x /usr/local/bin/hysteria \
+          || log_err "Hysteria2 下载失败"
     echo -e "${C_BLUE}---------------------------${C_RESET}"
 
     mkdir -p /etc/hysteria
-    HY2_PASSWORD=$(openssl rand -hex 8)
+    HY2_PASSWORD=$(openssl rand -hex 16)
 
     log_info "正在生成 Hysteria2 配置文件..."
     cat > /etc/hysteria/config.yaml <<EOF

@@ -6,7 +6,7 @@
 
 # 权限与运行环境预检
 if [[ $EUID -ne 0 ]]; then
-    echo -e "\e[31m[ERROR] 权限不足：执行本脚本需要 Root 权限。\e[0m"
+    echo -e "\e[31m[ERROR] 权限不足：执行本程序需要 Root 权限。\e[0m"
     echo -e "\e[33m请执行 'sudo -i' 或 'su -' 获取 Root 权限后重新运行。\e[0m"
     exit 1
 fi
@@ -14,8 +14,9 @@ fi
 # ==============================================================================
 # GROUP 1: 全局变量与环境声明 (Globals & Traps)
 # ==============================================================================
-readonly SCRIPT_VERSION="Pro Final V2 (Stability Edition + Hysteria2)"
+readonly SCRIPT_VERSION="Pro Final V2.1 (Stability Edition + Hysteria2)"
 readonly LOG_FILE="/dev/null"
+readonly LOCK_FILE="/var/run/xray_script.lock"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
 readonly XRAY_SHARE_DIR="/usr/local/share/xray"
 readonly XRAY_BIN="/usr/local/bin/xray"
@@ -47,11 +48,18 @@ GLOBAL_CERT_MODE=""
 GLOBAL_PORT=""
 HY2_PASSWORD=""
 
-CLEANUP_LIST=()
+# 进程互斥锁检测
+if [[ -f "$LOCK_FILE" ]]; then
+    echo -e "${C_RED}[ERROR] 安装程序已在运行中 (PID: $(cat "$LOCK_FILE"))，请勿重复执行。${C_RESET}"
+    exit 1
+fi
+echo $$ > "$LOCK_FILE"
+
+CLEANUP_LIST=("$LOCK_FILE")
 trap '[[ ${#CLEANUP_LIST[@]} -gt 0 ]] && rm -rf "${CLEANUP_LIST[@]}" 2>/dev/null' EXIT SIGHUP SIGINT SIGTERM
 
 # ==============================================================================
-# GROUP 2: 日志与交互展示层 (Loggers & Interactive UI)
+# GROUP 2: 日志引擎与交互展示层 (Loggers & Interactive UI)
 # ==============================================================================
 log_info() { echo -e "${C_BLUE}[INFO]${C_RESET} $1" | tee -a "$LOG_FILE"; }
 log_ok()   { echo -e "${C_GREEN}[OK]${C_RESET} $1" | tee -a "$LOG_FILE"; }
@@ -60,42 +68,52 @@ log_err()  { echo -e "${C_RED}[ERROR]${C_RESET} $1" | tee -a "$LOG_FILE"; exit 1
 
 get_listen_port() {
     while true; do
-        read -rp "请设置主监听端口 (范围 1-65535) [默认 443]: " PORT_INPUT
+        read -rp "请配置服务主监听端口 (范围 1-65535) [默认 443]: " PORT_INPUT
         GLOBAL_PORT=${PORT_INPUT:-443}
         if ! [[ "$GLOBAL_PORT" =~ ^[0-9]+$ ]] || [ "$GLOBAL_PORT" -lt 1 ] || [ "$GLOBAL_PORT" -gt 65535 ]; then
-            log_warn "输入的端口无效，请输入 1-65535 之间的数字。"
+            log_warn "端口参数非法，请输入 1-65535 之间的数值。"
             continue
         fi
         
         if [[ "$GLOBAL_INSTALL_MODE" == "1" || "$GLOBAL_INSTALL_MODE" == "3" ]] && { [ "$GLOBAL_PORT" -eq 80 ] || [ "$GLOBAL_PORT" -eq 8443 ] || [ "$GLOBAL_PORT" -eq 8444 ]; }; then
-            log_warn "端口冲突：当前模式下，端口 80/8443/8444 已被本地 Nginx 分流占用，请换一个端口。"
+            log_warn "端口冲突：当前模式下，端口 80/8443/8444 已被本地 Nginx 路由模块占用，请重新分配。"
             continue
         fi
         
-        if ss -tuln 2>/dev/null | grep -qE ":${GLOBAL_PORT}\b"; then
-            log_warn "端口占用：端口 $GLOBAL_PORT 已被其他程序占用，请重新分配。"
-        else
-            log_ok "端口 $GLOBAL_PORT 可以使用。\n"
-            break
+        # 协议级网络端口检测
+        local tcp_occ=$(ss -tln | grep -qE ":${GLOBAL_PORT}\b" && echo "1" || echo "0")
+        local udp_occ=$(ss -uln | grep -qE ":${GLOBAL_PORT}\b" && echo "1" || echo "0")
+
+        if [[ "$tcp_occ" == "1" ]]; then
+            log_warn "端口 $GLOBAL_PORT (TCP) 已被系统其他进程占用，请重新分配。"
+            continue
         fi
+
+        if [[ "$GLOBAL_INSTALL_MODE" == "3" && "$udp_occ" == "1" ]]; then
+            log_warn "端口 $GLOBAL_PORT (UDP) 已被占用。Hysteria2 引擎依赖 UDP 协议，请重新分配端口。"
+            continue
+        fi
+        
+        log_ok "端口 $GLOBAL_PORT 校验通过。\n"
+        break
     done
 }
 
 module_get_inputs() {
-    echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 1/3] 选择部署模式 ---${C_RESET}"
-    echo -e "  1. Web 回落模式        - 自动申请证书 + 搭建本地伪装网站，极其稳定安全。"
-    echo -e "  2. 纯净直连模式        - 借用大厂域名 (如 Apple) 伪装，不需要自己的域名，简单轻量。"
-    echo -e "  3. 全能共存模式 (新增) - 具有模式1所有功能，同时安装配置 Hysteria2 (共用端口)。"
-    read -rp "请选择 [1/2/3, 默认 1]: " MODE_INPUT
+    echo -e "\n${C_BOLD}${C_BLUE}--- [阶段 1/3] 选择基础架构模式 ---${C_RESET}"
+    echo -e "  1. Web 回落模式        - 自动化部署 TLS 证书与本地伪装站点，具备高稳定性与隐蔽性。"
+    echo -e "  2. 纯净直连模式        - 采用高信誉公共域名进行 SNI 伪装，无需独立域名，轻量级部署。"
+    echo -e "  3. 全能共存模式        - 融合 Web 回落架构，并同步拉起 Hysteria2 协议栈 (端口复用)。"
+    read -rp "请输入模式编号 [1/2/3, 默认 1]: " MODE_INPUT
     GLOBAL_INSTALL_MODE=${MODE_INPUT:-1}
 
     if [[ "$GLOBAL_INSTALL_MODE" == "1" || "$GLOBAL_INSTALL_MODE" == "3" ]]; then
-        read -rp "请输入已解析到本服务器的域名 (例如 my.domain.com): " GLOBAL_DOMAIN
+        read -rp "请输入已解析至当前服务器公网 IP 的域名 (例如 my.domain.com): " GLOBAL_DOMAIN
         GLOBAL_DOMAIN=$(echo "$GLOBAL_DOMAIN" | sed 's/^www\.//g' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
         
-        [[ -z "$GLOBAL_DOMAIN" ]] && log_err "域名不能为空或格式错误。"
+        [[ -z "$GLOBAL_DOMAIN" ]] && log_err "域名参数为空或格式异常。"
         
-        echo -e "\n${C_BLUE}正在测试域名解析状态...${C_RESET}"
+        echo -e "\n${C_BLUE}正在执行 DNS 记录可用性测试...${C_RESET}"
         local local_ip
         local_ip=$(curl -s4m 5 icanhazip.com || curl -s4m 5 ifconfig.me)
         
@@ -120,57 +138,57 @@ except:
             domain_ip=$(getent ahostsv4 "$GLOBAL_DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1)
         fi
         
-        echo -e "  本机公网 IP : ${C_YELLOW}${local_ip:-"获取超时"}${C_RESET}"
+        echo -e "  实例公网 IP : ${C_YELLOW}${local_ip:-"获取超时"}${C_RESET}"
         echo -e "  域名解析 IP : ${C_YELLOW}${domain_ip:-"解析失败"}${C_RESET}"
         
         if [[ -n "$local_ip" && "$local_ip" == "$domain_ip" ]]; then
-            echo -e "${C_GREEN}  [OK] IP 匹配成功，域名解析已生效。${C_RESET}\n"
+            echo -e "${C_GREEN}  [OK] 路由一致性校验通过，DNS 解析已生效。${C_RESET}\n"
         else
-            echo -e "${C_RED}  [WARN] 警告：域名的解析 IP 与本机 IP 不一致 (可能是开启了 CDN 或解析还没生效)。${C_RESET}\n"
+            echo -e "${C_RED}  [WARN] 警告：DNS 解析 IP 与实例本地 IP 不一致 (受 CDN 代理或 DNS 缓存影响)。${C_RESET}\n"
         fi
 
         get_listen_port
         
-        echo -e "${C_BOLD}${C_BLUE}--- [步骤 2/3] 选择证书验证方式 ---${C_RESET}"
-        echo -e "  1. DNS API 验证机制 (推荐) - 后台静默验证，支持泛域名，无惧端口被封。"
-        echo -e "  2. HTTP Standalone 机制    - 需要暂时占用本地 Web 端口进行验证。"
-        read -rp "请选择 [1/2, 默认 1]: " VERIFY_TYPE
+        echo -e "${C_BOLD}${C_BLUE}--- [阶段 2/3] 配置证书签发验证策略 ---${C_RESET}"
+        echo -e "  1. DNS API 验证模式 (推荐) - 纯后台执行验证逻辑，支持泛域名签发，规避端口审查。"
+        echo -e "  2. HTTP Standalone 模式    - 需临时接管本地 80 端口处理 ACME 挑战验证。"
+        read -rp "请输入验证策略编号 [1/2, 默认 1]: " VERIFY_TYPE
         
         if [[ "$VERIFY_TYPE" == "2" ]]; then
             GLOBAL_DNS_API="standalone"
         else
             echo -e "\n  1. Cloudflare\n  2. Namesilo"
-            read -rp "请选择你的域名服务商 [1/2]: " DNS_TYPE
+            read -rp "请选择 DNS 服务提供商 [1/2]: " DNS_TYPE
             if [[ "$DNS_TYPE" == "1" ]]; then
                 GLOBAL_DNS_API="dns_cf"
-                read -rp "输入 Cloudflare API Token: " GLOBAL_CF_TOKEN
-                read -rp "输入 Cloudflare Zone ID: " GLOBAL_CF_ZONE_ID
+                read -rp "请输入 Cloudflare API Token: " GLOBAL_CF_TOKEN
+                read -rp "请输入 Cloudflare Zone ID: " GLOBAL_CF_ZONE_ID
                 export CF_Token=$GLOBAL_CF_TOKEN
                 export CF_Zone_ID=$GLOBAL_CF_ZONE_ID
             else
                 GLOBAL_DNS_API="dns_namesilo"
-                read -rp "输入 Namesilo API Key: " GLOBAL_NAMESILO_KEY
+                read -rp "请输入 Namesilo API Key: " GLOBAL_NAMESILO_KEY
                 export Namesilo_Key=$GLOBAL_NAMESILO_KEY
             fi
         fi
 
-        echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 3/3] 选择证书申请环境 ---${C_RESET}"
-        echo -e "  1. Production (生产环境) - 颁发浏览器信任的正规证书 (注意有申请次数限制)。"
-        echo -e "  2. Staging    (测试环境) - 无次数限制，专用于测试部署流程是否通畅。"
-        read -rp "请选择 [1/2, 默认 1]: " CERT_MODE_INPUT
+        echo -e "\n${C_BOLD}${C_BLUE}--- [阶段 3/3] 指定证书签发环境 ---${C_RESET}"
+        echo -e "  1. Production (生产环境) - 获取受信任的 CA 证书 (受 API 速率限制)。"
+        echo -e "  2. Staging    (测试环境) - 仅供流程调试使用，无 API 速率限制。"
+        read -rp "请输入签发环境编号 [1/2, 默认 1]: " CERT_MODE_INPUT
         if [[ "$CERT_MODE_INPUT" == "2" ]]; then
             GLOBAL_CERT_MODE="--staging"
-            log_warn "当前已选择：Staging 测试环境。"
+            log_warn "已配置：Staging 测试环境。"
         else
             GLOBAL_CERT_MODE="--server letsencrypt"
-            log_info "当前已选择：Production 生产环境。"
+            log_info "已配置：Production 生产环境。"
         fi
 
     else
-        echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 1/2] 设置伪装域名 (SNI) ---${C_RESET}"
-        echo -e "  建议选择当地连通率高且支持 TLS 1.3 的大型公共业务域名。"
-        echo -e "  备选范例: www.apple.com / gateway.icloud.com / www.microsoft.com"
-        read -rp "请输入用于伪装的公共域名 [默认 www.apple.com]: " PUBLIC_SNI_INPUT
+        echo -e "\n${C_BOLD}${C_BLUE}--- [阶段 1/2] 配置特征伪装域名 (SNI) ---${C_RESET}"
+        echo -e "  建议采用目标网络环境下连通率高且支持 TLS 1.3 的大型业务域名。"
+        echo -e "  参考规范: www.apple.com / gateway.icloud.com / www.microsoft.com"
+        read -rp "请输入目标 SNI 域名 [默认 www.apple.com]: " PUBLIC_SNI_INPUT
         GLOBAL_PUBLIC_SNI=${PUBLIC_SNI_INPUT:-"www.apple.com"}
         GLOBAL_PUBLIC_SNI=$(echo "$GLOBAL_PUBLIC_SNI" | sed 's/^https:\/\///g' | sed 's/^http:\/\///g' | sed 's/\/$//g' | tr -d '[:space:]')
         get_listen_port
@@ -179,84 +197,81 @@ except:
 
 module_show_result() {
     clear
-    echo -e "${C_GREEN}------------------------------------------------------------------${C_RESET}"
-    echo -e "${C_BOLD}${C_GREEN}[OK] 部署全部完成！(DEPLOYMENT SUCCESS)${C_RESET}"
-    echo -e "${C_GREEN}------------------------------------------------------------------${C_RESET}"
+    echo -e "${C_GREEN}==================================================================${C_RESET}"
+    echo -e "${C_BOLD}${C_GREEN}[OK] 系统架构部署就绪 (SYSTEM DEPLOYMENT SUCCESSFUL)${C_RESET}"
+    echo -e "${C_GREEN}==================================================================${C_RESET}"
     
     local client_addr; local client_sni
     if [[ "$GLOBAL_INSTALL_MODE" == "1" || "$GLOBAL_INSTALL_MODE" == "3" ]]; then
         client_addr="$GLOBAL_DOMAIN"; client_sni="$GLOBAL_DOMAIN"
     else
         local local_ip=$(curl -s4m 5 icanhazip.com || curl -s4m 5 ifconfig.me)
-        client_addr="${local_ip:-"你的VPS_IP"}"; client_sni="$GLOBAL_PUBLIC_SNI"
+        client_addr="${local_ip:-"实例公网IP"}"; client_sni="$GLOBAL_PUBLIC_SNI"
     fi
     local vless_link="vless://${UUID}@${client_addr}:${GLOBAL_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${client_sni}&fp=chrome&pbk=${PUB}&sid=${SID}&type=tcp#Reality_${client_sni}"
     
-    echo -e "${C_BOLD}[Xray Reality 信息]${C_RESET}"
-    echo -e " 网络端点   : ${C_YELLOW}$GLOBAL_PORT (TCP)${C_RESET}"
-    echo -e " UUID 标识  : ${C_YELLOW}$UUID${C_RESET}"
-    echo -e " Public Key : ${C_YELLOW}$PUB${C_RESET}"
-    echo -e " Short ID   : ${C_YELLOW}$SID${C_RESET}"
+    echo -e "${C_BOLD}[Xray Reality 节点参数]${C_RESET}"
+    echo -e " 接入端点   : ${C_YELLOW}$GLOBAL_PORT (TCP)${C_RESET}"
+    echo -e " 身份凭证   : ${C_YELLOW}$UUID${C_RESET}"
+    echo -e " 公钥 (PUB) : ${C_YELLOW}$PUB${C_RESET}"
+    echo -e " 短 ID (SID): ${C_YELLOW}$SID${C_RESET}"
     echo -e " 路由 SNI   : ${C_BLUE}$client_sni${C_RESET}"
-    echo -e "${C_BOLD}客户端分享链接 (URI Format):${C_RESET}\n${C_GREEN}$vless_link${C_RESET}\n"
+    echo -e "${C_BOLD}统一资源标识符 (URI Format):${C_RESET}\n${C_GREEN}$vless_link${C_RESET}\n"
     
     echo "$vless_link" | qrencode -t ansiutf8
 
     if [[ "$GLOBAL_INSTALL_MODE" == "3" ]]; then
         local hy2_link="hy2://${HY2_PASSWORD}@${GLOBAL_DOMAIN}:${GLOBAL_PORT}/?sni=${GLOBAL_DOMAIN}&alpn=h3&insecure=0#Hysteria2_${GLOBAL_DOMAIN}"
         echo -e "\n------------------------------------------------------------------"
-        echo -e "${C_BOLD}[Hysteria2 信息]${C_RESET}"
-        echo -e " 网络端点   : ${C_YELLOW}$GLOBAL_PORT (UDP)${C_RESET}"
-        echo -e " 连接密码   : ${C_YELLOW}$HY2_PASSWORD${C_RESET}"
-        echo -e " 伪装回落   : ${C_BLUE}Nginx (127.0.0.1:8444)${C_RESET}"
-        echo -e "${C_BOLD}客户端分享链接 (URI Format):${C_RESET}\n${C_GREEN}$hy2_link${C_RESET}\n"
+        echo -e "${C_BOLD}[Hysteria2 节点参数]${C_RESET}"
+        echo -e " 接入端点   : ${C_YELLOW}$GLOBAL_PORT (UDP)${C_RESET}"
+        echo -e " 认证密钥   : ${C_YELLOW}$HY2_PASSWORD${C_RESET}"
+        echo -e " 防火墙回落 : ${C_BLUE}Nginx (127.0.0.1:8444)${C_RESET}"
+        echo -e "${C_BOLD}统一资源标识符 (URI Format):${C_RESET}\n${C_GREEN}$hy2_link${C_RESET}\n"
     fi
 }
 
 # ==============================================================================
-# GROUP 3: 基础环境与网络优化 (System Pre-requisites & BBR)
+# GROUP 3: 基础环境与网络栈优化 (System Pre-requisites & BBR)
 # ==============================================================================
 module_prepare_env() {
-    log_info "正在配置系统环境和日志策略..."
+    log_info "正在初始化系统级依赖与日志轮转策略..."
 
     mkdir -p /etc/systemd/journald.conf.d/
     echo -e "[Journal]\nSystemMaxUse=100M\nMaxRetentionSec=7day\nForwardToSyslog=no" > /etc/systemd/journald.conf.d/99-prophet.conf
     systemctl restart systemd-journald || true
 
-    log_info "正在更新软件源并检查进程锁..."
+    log_info "正在清理包管理器进程锁并更新软件源..."
     rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
     apt-get update -yqq >/dev/null 2>&1
     
-    local common_deps="curl unzip openssl jq qrencode"
-    local check_deps=("curl" "unzip" "openssl" "jq" "qrencode")
-
+    # 动态构建基础组件安装清单
+    local install_list="curl unzip openssl jq qrencode"
     if [[ "$GLOBAL_INSTALL_MODE" == "1" || "$GLOBAL_INSTALL_MODE" == "3" ]]; then
-        log_info "正在安装所需的基础软件 (Nginx, Socat)..."
-        apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-            $common_deps nginx socat >/dev/null 2>&1
-        check_deps+=("nginx" "socat")
+        install_list="$install_list nginx socat"
         mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl /var/www/html
-    else
-        log_info "正在安装模式 2 所需的基础软件..."
-        apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-            $common_deps >/dev/null 2>&1
     fi
+
+    log_info "正在执行基础组件的并发安装..."
+    apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+        $install_list >/dev/null 2>&1
         
-    for cmd in "${check_deps[@]}"; do
+    # 依赖完整性校验
+    for cmd in curl unzip openssl jq qrencode; do
         if ! command -v "$cmd" &> /dev/null; then
-            log_err "组件 [$cmd] 安装失败，请检查网络或系统软件源。"
+            log_err "核心组件 [$cmd] 部署失败，请排查系统软件源可用性。"
         fi
     done
     
     mkdir -p "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /usr/local/bin
-    log_ok "基础软件及目录准备完毕。"
+    log_ok "系统级基础环境预处理完成。"
 }
 
 module_setup_bbr() {
-    log_info "正在检查网络加速 (BBR) 状态..."
+    log_info "正在检测底层网络拥塞控制算法 (TCP BBR) 状态..."
     
     local bbr_conf_file="/etc/sysctl.conf"
-    local os_info="未知系统"
+    local os_info="未知内核"
     
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
@@ -271,7 +286,7 @@ module_setup_bbr() {
         fi
     fi
 
-    log_info "当前系统信息: ${C_YELLOW}${os_info}${C_RESET} | 目标配置路径: ${C_YELLOW}${bbr_conf_file}${C_RESET}"
+    log_info "内核识别: ${C_YELLOW}${os_info}${C_RESET} | 目标配置路由: ${C_YELLOW}${bbr_conf_file}${C_RESET}"
 
     if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
         sed -i '/net.core.default_qdisc/d' "$bbr_conf_file" 2>/dev/null || true
@@ -284,14 +299,14 @@ module_setup_bbr() {
         else
             sysctl --system >/dev/null 2>&1
         fi
-        log_ok "BBR 网络加速已成功开启。"
+        log_ok "TCP BBR 网络加速算法已成功挂载。"
     else
-        log_ok "网络加速 (BBR) 已处于开启状态，跳过配置。"
+        log_ok "TCP BBR 算法已处于运行状态，无需重复注入。"
     fi
 }
 
 # ==============================================================================
-# GROUP 4: 证书验证与前置代理网关 (Certificates & Nginx)
+# GROUP 4: 证书自动化调度与 Nginx 代理网关 (Certificates & Nginx)
 # ==============================================================================
 module_issue_cert() {
     local domain=$1
@@ -300,19 +315,19 @@ module_issue_cert() {
     local acme_bin="/root/.acme.sh/acme.sh"
 
     if [[ ! -s "$cert_file" ]]; then
-        log_info "正在向 Let's Encrypt 申请 TLS 证书 ($domain)..."
+        log_info "正在通过 ACME 协议向 Let's Encrypt 发起 TLS 证书签发请求 ($domain)..."
         
         local tmp_acme="/tmp/acme_$(date +%s)"
         CLEANUP_LIST+=("$tmp_acme")
         mkdir -p "$tmp_acme"
-        cd "$tmp_acme" || log_err "创建临时工作目录失败。"
+        cd "$tmp_acme" || log_err "工作区目录创建异常。"
         
-        echo -e "${C_BLUE}--- 开始申请证书 ---${C_RESET}"
+        echo -e "${C_BLUE}--- 初始化 ACME 环境 ---${C_RESET}"
         if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}" --nocron && [[ -s "$acme_bin" ]]; then
-            log_ok "证书申请工具 (ACME) 安装成功。"
+            log_ok "ACME 自动化套件安装成功。"
             "$acme_bin" --upgrade --auto-upgrade "$AUTO_UPGRADE" >/dev/null 2>&1
         else
-            log_err "证书申请工具安装失败，请检查网络连接。"
+            log_err "ACME 套件拉取超时，请排查网络出站连通性。"
         fi
         
         if [[ "$api" == "standalone" ]]; then
@@ -322,7 +337,7 @@ module_issue_cert() {
             "$acme_bin" --issue --dns "$api" -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE
         fi
         
-        # 模式3自动追加 Hysteria2 重启逻辑
+        # 动态构建证书下发后的服务重载指令
         local reload_cmd="systemctl restart nginx || true"
         if [[ "$GLOBAL_INSTALL_MODE" == "3" ]]; then
             reload_cmd="systemctl restart nginx; systemctl restart hysteria-server || true"
@@ -332,30 +347,30 @@ module_issue_cert() {
             --key-file "/etc/nginx/ssl/${domain}_ecc.key" \
             --fullchain-file "$cert_file" \
             --reloadcmd "$reload_cmd"
-        echo -e "${C_BLUE}--------------------${C_RESET}"
+        echo -e "${C_BLUE}------------------------${C_RESET}"
             
         cd "$HOME" || true
         
         if [[ -s "$cert_file" ]]; then
-            log_ok "TLS 证书申请成功并部署到 Nginx。"
+            log_ok "TLS 证书签发完成并成功部署至网关层。"
             local acme_conf="/root/.acme.sh/account.conf"
             if [[ -f "$acme_conf" ]]; then
                 grep -q "LE_NO_LOG" "$acme_conf" || echo "LE_NO_LOG='1'" >> "$acme_conf"
                 grep -q "LE_LOG_FILE" "$acme_conf" || echo "LE_LOG_FILE='/dev/null'" >> "$acme_conf"
                 grep -q "DEBUG" "$acme_conf" || echo "DEBUG='0'" >> "$acme_conf"
-                log_info "证书工具的隐私设置已生效 (不记录日志)。"
+                log_info "已强制覆写 ACME 日志策略以保障隐私。"
             fi
         else
-            log_err "证书申请失败，请查看上方报错信息。"
+            log_err "证书签发链路失败，请检查上文 API 响应。"
         fi
     else
-        log_info "检测到服务器已存在有效证书，跳过申请步骤。"
+        log_info "探测到本地存在合规证书凭据，跳过重复签发逻辑。"
     fi
 }
 
 module_config_nginx() {
     local domain=$1
-    log_info "正在配置 Nginx 主程序..."
+    log_info "正在编译 Nginx 全局调度配置..."
 
     cat > /etc/nginx/nginx.conf <<'EOF'
 user www-data;
@@ -384,12 +399,12 @@ http {
 }
 EOF
 
-    log_info "正在配置 Nginx 伪装网站和安全策略..."
+    log_info "正在配置 Nginx 站点防探测规则..."
     rm -f /etc/nginx/sites-enabled/default
     
     local NGINX_VER
     NGINX_VER=$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-    log_info "当前 Nginx 版本: ${C_YELLOW}${NGINX_VER}${C_RESET}"
+    log_info "宿主机 Nginx 引擎版本: ${C_YELLOW}${NGINX_VER}${C_RESET}"
     
     local reject_handshake="ssl_reject_handshake on;"
     if [ "$(printf '%s\n' "1.22.0" "$NGINX_VER" | sort -V | head -n1)" != "1.22.0" ]; then
@@ -432,7 +447,7 @@ server {
 }
 EOF
 
-    # 模式3特供：Hysteria2 本地伪装站点回落监听
+    # 针对全能共存模式：配置 Hysteria2 的本地伪装站点回落转发
     if [[ "$GLOBAL_INSTALL_MODE" == "3" ]]; then
         cat >> "$tmp_conf" <<EOF
 server {
@@ -458,10 +473,10 @@ EOF
     
     if ! nginx -t >/dev/null 2>&1; then
         rm -f /etc/nginx/sites-enabled/xray
-        log_err "Nginx 配置文件存在错误，启动失败。"
+        log_err "Nginx 配置语法解析异常，服务重载终止。"
     fi
 
-    log_info "正在下载伪装网页文件..."
+    log_info "正在拉取远端前端静态资源库..."
     local target_dir="/var/www/html"
     local temp_extract="/tmp/web_temp_$(date +%s)"
     CLEANUP_LIST+=("$temp_extract" "/tmp/web_template.zip")
@@ -469,7 +484,7 @@ EOF
 
     rm -rf "${target_dir:?}/"* "${target_dir:?}/".[!.]* "${target_dir:?}/"..?* 2>/dev/null
 
-    echo -e "${C_BLUE}--- 解压伪装网页 ---${C_RESET}"
+    echo -e "${C_BLUE}--- 部署静态资源映射 ---${C_RESET}"
     if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused --max-time 120 \
    -o /tmp/web_template.zip "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main" \
    && [[ -s /tmp/web_template.zip ]]; then
@@ -477,26 +492,26 @@ EOF
         if unzip -qo /tmp/web_template.zip -d "$temp_extract"; then
             inner_dir=$(find "$temp_extract" -mindepth 1 -maxdepth 1 -type d | head -n1)
             cp -a "$inner_dir"/. "$target_dir/" 2>/dev/null
-            log_ok "伪装网页部署成功。"
+            log_ok "前端静态资源构建完成。"
         fi
         rm -rf "$temp_extract" /tmp/web_template.zip 2>/dev/null
     fi
-    echo -e "${C_BLUE}--------------------${C_RESET}"
+    echo -e "${C_BLUE}------------------------${C_RESET}"
 
     if [[ ! -s "$target_dir/index.html" ]]; then
         echo '<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body style="background-color:black;color:white;text-align:center;padding-top:20%"><p>403 Forbidden</p><hr><p>nginx</p></body></html>' > "$target_dir/index.html"
     fi
 
     systemctl enable nginx >/dev/null 2>&1
-    systemctl restart nginx || log_err "Nginx 服务启动失败。"
-    log_ok "Nginx 服务启动成功。"
+    systemctl restart nginx || log_err "Nginx 守护进程唤醒失败。"
+    log_ok "Nginx 代理网关已上线。"
 }
 
 # ==============================================================================
-# GROUP 5: 代理核心引擎与路由策略 (Xray & Hysteria2)
+# GROUP 5: 代理核心引擎与路由策略装配 (Xray & Hysteria2)
 # ==============================================================================
 module_install_xray_core() {
-    log_info "正在识别系统架构并下载 Xray 核心文件..."
+    log_info "正在匹配系统指令集并拉取 Xray 核心..."
     local arch
     arch=$(dpkg --print-architecture)
     [[ "$arch" == "amd64" ]] && local arch_xray="64" || local arch_xray="arm64-v8a"
@@ -509,8 +524,14 @@ module_install_xray_core() {
     local zip_url="https://github.com/XTLS/Xray-core/releases/latest/download/${zip_name}"
     
     echo -e "${C_BLUE}--- 下载 Xray 核心 ---${C_RESET}"
-    curl -fL -# -o "$zip_name" "$zip_url" && unzip -qo "$zip_name" || log_err "Xray核心下载解压失败"
-    echo -e "${C_BLUE}----------------------${C_RESET}"
+    if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 120 -o "$zip_name" "$zip_url" && [[ -s "$zip_name" ]]; then
+        log_ok "Xray 核心文件下载成功。"
+    else
+        log_err "Xray 核心文件下载失败，请检查网络。"
+    fi
+    echo -e "${C_BLUE}------------------------${C_RESET}"
+
+    unzip -qo "$zip_name" || log_err "压缩包解压失败。"
     
     mv -f xray "$XRAY_BIN" && chmod +x "$XRAY_BIN"
     mkdir -p "$XRAY_SHARE_DIR"
@@ -518,7 +539,7 @@ module_install_xray_core() {
     
     cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
-Description=Xray Service
+Description=Xray Routing Engine
 After=network.target nss-lookup.target
 
 [Service]
@@ -534,12 +555,12 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     cd "$HOME" && rm -rf "$tmp_xray"
-    log_ok "Xray 系统服务配置完成。"
+    log_ok "Xray 守护进程实例配置就绪。"
 }
 
 module_config_xray() {
     local domain=$1
-    log_info "正在生成 Xray 配置文件和加密密钥..."
+    log_info "正在生成 Xray 核心路由配置与加密向量..."
     
     if [[ -f "$XRAY_CONFIG" ]]; then
         UUID=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONFIG" 2>/dev/null)
@@ -566,7 +587,7 @@ module_config_xray() {
         PUB=$($XRAY_BIN x25519 -i "$PRIV" 2>/dev/null | grep -iE "Public|Password" | grep -oE '[A-Za-z0-9_-]{43}' | head -n1)
     fi
 
-    log_ok "安全加密密钥生成成功。"
+    log_ok "X25519 密钥对生成器执行成功。"
     
     mkdir -p "$XRAY_CONF_DIR"
     local dest_addr="127.0.0.1:8443"; local server_names_json="[\"$domain\", \"www.$domain\"]"
@@ -631,13 +652,13 @@ module_config_xray() {
 }
 EOF
     systemctl enable xray >/dev/null 2>&1
-    systemctl restart xray || log_err "Xray 启动失败，请检查配置文件格式。"
-    log_ok "Xray 路由规则配置成功。"
+    systemctl restart xray || log_err "Xray 引擎唤醒失败，请复查 JSON 结构。"
+    log_ok "Xray 全局路由及入站规则编译写入完成。"
 }
 
 module_install_hysteria() {
     local domain=$1
-    log_info "正在下载并安装 Hysteria2 核心..."
+    log_info "正在获取并装配 Hysteria2 协议栈..."
     
     local arch=$(dpkg --print-architecture)
     local hy2_arch="amd64"
@@ -645,18 +666,18 @@ module_install_hysteria() {
 
     local hy2_url="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy2_arch}"
     
-    echo -e "${C_BLUE}--- 下载 Hysteria2 核心 ---${C_RESET}"
+    echo -e "${C_BLUE}--- 构建 Hysteria2 二进制 ---${C_RESET}"
     curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 120 \
           -o /usr/local/bin/hysteria "$hy2_url" \
           && [[ -s /usr/local/bin/hysteria ]] \
           && chmod +x /usr/local/bin/hysteria \
-          || log_err "Hysteria2 下载失败"
-    echo -e "${C_BLUE}---------------------------${C_RESET}"
+          || log_err "Hysteria2 核心拉取异常。"
+    echo -e "${C_BLUE}-----------------------------${C_RESET}"
 
     mkdir -p /etc/hysteria
     HY2_PASSWORD=$(openssl rand -hex 16)
 
-    log_info "正在生成 Hysteria2 配置文件..."
+    log_info "正在编译 Hysteria2 参数矩阵..."
     cat > /etc/hysteria/config.yaml <<EOF
 listen: :$GLOBAL_PORT
 
@@ -686,7 +707,7 @@ EOF
 
     cat > /etc/systemd/system/hysteria-server.service <<EOF
 [Unit]
-Description=Hysteria2 Server
+Description=Hysteria2 QUIC Engine
 After=network.target
 
 [Service]
@@ -703,15 +724,15 @@ EOF
 
     systemctl daemon-reload
     systemctl enable hysteria-server >/dev/null 2>&1
-    systemctl restart hysteria-server || log_err "Hysteria2 启动失败，请检查系统环境。"
-    log_ok "Hysteria2 配置与部署成功。"
+    systemctl restart hysteria-server || log_err "Hysteria2 引擎唤醒失败，请检查端口占用。"
+    log_ok "Hysteria2 服务链配置上线完成。"
 }
 
 # ==============================================================================
-# GROUP 6: 自动化守护与系统清理 (Automation & Cleanup)
+# GROUP 6: 自动化守护机制与系统垃圾回收 (Automation & Cleanup)
 # ==============================================================================
 module_setup_automation() {
-    log_info "正在配置自动更新任务..."
+    log_info "正在注入定时计划与自动化更新策略..."
     mkdir -p "$SCRIPT_DIR"
 
     cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
@@ -722,7 +743,8 @@ SHARE_DIR="/usr/local/share/xray"
 changed=0
 update_f() {
     local f=$1; local u=$2
-    if curl -fL --connect-timeout 10 --max-time 120 --retry 5 --retry-delay 3 --retry-connrefused -o "$SHARE_DIR/${f}.new" "$u" && [[ -s "$SHARE_DIR/${f}.new" ]]; then
+    # 逻辑优化：移除了 --max-time 限制以兼容大文件传输，仅保留 60 秒连接超时
+    if curl -fL --connect-timeout 60 --retry 5 --retry-delay 3 --retry-connrefused -o "$SHARE_DIR/${f}.new" "$u" && [[ -s "$SHARE_DIR/${f}.new" ]]; then
         if ! cmp -s "$SHARE_DIR/${f}.new" "$SHARE_DIR/$f"; then
             mv -f "$SHARE_DIR/${f}.new" "$SHARE_DIR/$f"
             changed=1; return 0
@@ -738,13 +760,13 @@ fi
 EOF
     chmod +x "$SCRIPT_DIR/update-dat.sh"
 
-    echo -e "${C_BLUE}--- 路由分流资源热同步 ---${C_RESET}"
+    echo -e "${C_BLUE}--- 执行首次路由分流规则拉取 ---${C_RESET}"
     bash "$SCRIPT_DIR/update-dat.sh" 2>&1 | tee -a "$LOG_FILE"
-    echo -e "${C_BLUE}--------------------------${C_RESET}"
+    echo -e "${C_BLUE}--------------------------------${C_RESET}"
 
     cat > /etc/systemd/system/xray-dat.service <<EOF
 [Unit]
-Description=Xray Dat Update Service
+Description=Xray Dat Database Updater
 [Service]
 Type=oneshot
 User=root
@@ -768,7 +790,7 @@ EOF
     if [[ "$GLOBAL_INSTALL_MODE" == "1" || "$GLOBAL_INSTALL_MODE" == "3" ]]; then
         cat > /etc/systemd/system/xray-acme.service <<EOF
 [Unit]
-Description=Acme.sh Certificate Renewal Service
+Description=Acme.sh Certificate Renewal Daemon
 [Service]
 Type=oneshot
 User=root
@@ -797,17 +819,17 @@ EOF
     systemctl daemon-reload
     systemctl enable --now xray-dat.timer >/dev/null 2>&1
     [[ "$GLOBAL_INSTALL_MODE" == "1" || "$GLOBAL_INSTALL_MODE" == "3" ]] && systemctl enable --now xray-acme.timer >/dev/null 2>&1
-    log_ok "自动更新任务配置完成。"
+    log_ok "全局自动化守护策略部署完毕。"
 }
 
 module_cleanup() {
-    log_info "正在清理安装过程中产生的系统垃圾..."
+    log_info "正在执行系统运行内存与安装缓存清理..."
     apt-get autoremove -yqq >/dev/null 2>&1; apt-get clean -yqq >/dev/null 2>&1
-    log_ok "系统垃圾清理完毕。"
+    log_ok "临时垃圾数据回收完成。"
 }
 
 # ==============================================================================
-# GROUP 7: 主控引擎与 CLI 菜单 (Main Scheduler & CLI Menu)
+# GROUP 7: 主干控制流与 CLI 管理终端 (Main Scheduler & CLI Menu)
 # ==============================================================================
 main_install() {
     cd "$HOME" || exit 1
@@ -846,21 +868,21 @@ main_install() {
 while true; do
     clear
     echo -e "${C_BLUE}"
-    echo -e " ----------------------------------------------"
-    echo -e "   REALITY + HYSTERIA2 AUTOMATION CLI ENGINE"
-    echo -e "   Build: $SCRIPT_VERSION"
-    echo -e " ----------------------------------------------${C_RESET}\n"
+    echo -e " =============================================="
+    echo -e "  XR+HY2 ENTERPRISE AUTOMATION CONTROLLER"
+    echo -e "  Framework Version: $SCRIPT_VERSION"
+    echo -e " ==============================================${C_RESET}\n"
     
-    echo -e "  1. ${C_GREEN}执行部署脚本${C_RESET}"
-    echo -e "  2. ${C_YELLOW}卸载服务${C_RESET}"
-    echo -e "  3. ${C_BLUE}查看定时任务+证书状态${C_RESET}"
-    echo -e "  0. ${C_RED}退出脚本${C_RESET}\n"
+    echo -e "  [1] ${C_GREEN}编译并安装核心节点组件${C_RESET}"
+    echo -e "  [2] ${C_YELLOW}安全卸载并擦除运行轨迹${C_RESET}"
+    echo -e "  [3] ${C_BLUE}巡检守护进程及证书状态${C_RESET}"
+    echo -e "  [0] ${C_RED}安全退出控制台${C_RESET}\n"
     
-    read -rp "请输入数字选择功能 [0-3]: " OPT
+    read -rp "请键入指令对应序号 [0-3]: " OPT
     case $OPT in
         1) main_install ; break ;;
         2)
-            echo -e "\n${C_BLUE}[INFO]${C_RESET} 正在停止并删除相关服务..."
+            echo -e "\n${C_BLUE}[INFO]${C_RESET} 正在阻断关联进程并释放系统资源..."
             systemctl stop xray hysteria-server nginx xray-acme.timer xray-acme.service xray-dat.timer xray-dat.service >/dev/null 2>&1
             systemctl disable xray hysteria-server nginx xray-acme.timer xray-dat.timer >/dev/null 2>&1
             rm -f /etc/systemd/system/xray.service /etc/systemd/system/hysteria-server.service /usr/local/bin/xray /usr/local/bin/hysteria /etc/systemd/system/xray-acme.* /etc/systemd/system/xray-dat.*
@@ -868,26 +890,26 @@ while true; do
             rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
             rm -rf /var/www/html/{*,.[!.]*,..?*} "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/hysteria /etc/nginx/ssl /root/.acme.sh 2>/dev/null
             
-            echo -e "\n${C_YELLOW}文件清理完毕。(注：已为您保留 BBR 网络加速与日志限制最大100M，保留7天策略)${C_RESET}"
-            echo -e "${C_RED}[WARN] 是否连带卸载底层系统软件 (Nginx, Socat, qrencode, jq)？${C_RESET}"
-            read -rp "如果你的服务器上还跑了别的网站或程序，请选 N！[y/N, 默认 N]: " SCORCHED_EARTH
+            echo -e "\n${C_YELLOW}架构级文件已擦除。(备注：系统级网络调优 BBR 与日志限制策略已保留)${C_RESET}"
+            echo -e "${C_RED}[WARN] 警告：是否执行深度清理，彻底抹除底层系统依赖 (Nginx, Socat, qrencode, jq)？${C_RESET}"
+            read -rp "若当前实例承载其他 Web 业务，请务必输入 N 拒绝！[y/N, 默认 N]: " SCORCHED_EARTH
             case "${SCORCHED_EARTH}" in
                 [yY][eE][sS]|[yY])
-                    log_info "正在卸载基础软件 (Nginx, Socat, qrencode, jq)..."
+                    log_info "正在调用包管理器销毁底层依赖组件..."
                     apt-get purge -yqq nginx nginx-common socat qrencode jq >/dev/null 2>&1
                     apt-get autoremove -yqq >/dev/null 2>&1; apt-get clean >/dev/null 2>&1
-                    log_ok "基础软件卸载完毕。" ;;
-                *) log_info "已保留基础软件环境。" ;;
+                    log_ok "深度清理与依赖回收已完成。" ;;
+                *) log_info "已中止依赖卸载，保留原有底层环境。" ;;
             esac
-            echo -e "${C_GREEN}[OK] 系统卸载与清理彻底完成。${C_RESET}"
-            read -rp "按回车键返回菜单..." ;;
+            echo -e "${C_GREEN}[OK] 逆向回退操作执行完毕，系统状态已恢复。${C_RESET}"
+            read -rp "按下回车键返回主控制台..." ;;
         3)
-            echo -e "\n${C_BOLD}${C_BLUE}--- 自动任务运行状态 ---${C_RESET}"
-            systemctl list-timers --all | grep -E "xray-acme|xray-dat" || echo "当前没有运行中的定时任务"
-            echo -e "\n${C_BOLD}${C_BLUE}--- 证书工具信息 ---${C_RESET}"
+            echo -e "\n${C_BOLD}${C_BLUE}--- 自动化守护服务巡检 ---${C_RESET}"
+            systemctl list-timers --all | grep -E "xray-acme|xray-dat" || echo "异常：未检测到挂载的守护任务"
+            echo -e "\n${C_BOLD}${C_BLUE}--- TLS 证书颁发机构接口状态 ---${C_RESET}"
             [[ -f "/root/.acme.sh/acme.sh" ]] && /root/.acme.sh/acme.sh --cron --home "/root/.acme.sh"
-            read -rp "按回车键返回菜单..." ;;
-        0) echo -e "\n已退出。"; exit 0 ;;
-        *) echo -e "\n${C_RED}[ERROR] 输入无效，请重新选择。${C_RESET}" ; sleep 1 ;;
+            read -rp "按下回车键返回主控制台..." ;;
+        0) echo -e "\n进程已终止。"; exit 0 ;;
+        *) echo -e "\n${C_RED}[ERROR] 指令无法解析，请重新输入。${C_RESET}" ; sleep 1 ;;
     esac
 done

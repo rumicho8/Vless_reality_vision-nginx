@@ -109,7 +109,8 @@ module_get_inputs() {
 
     if [[ "$GLOBAL_INSTALL_MODE" == "1" || "$GLOBAL_INSTALL_MODE" == "3" ]]; then
         read -rp "请输入已解析至当前服务器公网 IP 的域名 (例如 my.domain.com): " GLOBAL_DOMAIN
-        GLOBAL_DOMAIN=$(echo "$GLOBAL_DOMAIN" | sed 's/^www\.//g' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        # 移除 www 自动清洗逻辑，严格遵守输入
+        GLOBAL_DOMAIN=$(echo "$GLOBAL_DOMAIN" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
         
         [[ -z "$GLOBAL_DOMAIN" ]] && log_err "域名参数为空或格式异常。"
         
@@ -330,11 +331,12 @@ module_issue_cert() {
             log_err "ACME 套件拉取超时，请排查网络出站连通性。"
         fi
         
+        # 移除相关强制多域名申请，严格遵照单一输入域名
         if [[ "$api" == "standalone" ]]; then
             command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1
-            "$acme_bin" --issue -d "$domain" -d "www.$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE --pre-hook "systemctl stop nginx || true" --post-hook "systemctl start nginx || true"
+            "$acme_bin" --issue -d "$domain" --standalone --keylength ec-256 $GLOBAL_CERT_MODE --pre-hook "systemctl stop nginx || true" --post-hook "systemctl start nginx || true"
         else
-            "$acme_bin" --issue --dns "$api" -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE
+            "$acme_bin" --issue --dns "$api" -d "$domain" --keylength ec-256 $GLOBAL_CERT_MODE
         fi
         
         # 动态构建证书下发后的服务重载指令
@@ -417,6 +419,7 @@ EOF
     http2 on;"
     fi
     
+    # Nginx 配置文件去除所有的 www.$domain
     local tmp_conf="/tmp/xray_nginx.conf"
     cat > "$tmp_conf" <<EOF
 server {
@@ -428,7 +431,7 @@ server {
     ${listen_directive}
     ssl_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
-    server_name $domain www.$domain;
+    server_name $domain;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
@@ -442,7 +445,7 @@ server {
 server {
     listen 80;
     listen [::]:80;
-    server_name $domain www.$domain;
+    server_name $domain;
     return 301 https://\$host\$request_uri;
 }
 EOF
@@ -452,7 +455,7 @@ EOF
         cat >> "$tmp_conf" <<EOF
 server {
     listen 127.0.0.1:8444;
-    server_name $domain www.$domain;
+    server_name $domain;
 
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff always;
@@ -590,7 +593,8 @@ module_config_xray() {
     log_ok "X25519 密钥对生成器执行成功。"
     
     mkdir -p "$XRAY_CONF_DIR"
-    local dest_addr="127.0.0.1:8443"; local server_names_json="[\"$domain\", \"www.$domain\"]"
+    # Xray 路由数组彻底移除 www 备用域名
+    local dest_addr="127.0.0.1:8443"; local server_names_json="[\"$domain\"]"
     [[ "$GLOBAL_INSTALL_MODE" == "2" ]] && { dest_addr="$GLOBAL_PUBLIC_SNI:443"; server_names_json="[\"$GLOBAL_PUBLIC_SNI\"]"; }
     
     cat > "$XRAY_CONFIG" <<EOF

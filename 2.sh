@@ -417,9 +417,9 @@ server {
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
     server_name $domain;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Content-Type-Options nosniff;
-    add_header Referrer-Policy strict-origin-when-cross-origin;
-    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header X-Frame-Options SAMEORIGIN always;
     location / {
         root /var/www/html;
         index index.html;

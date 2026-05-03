@@ -755,7 +755,7 @@ masquerade:
   type: proxy
   proxy:
     url: http://127.0.0.1:8444
-    rewriteHost: false
+    rewriteHost: true
 
 quic:
   initStreamReceiveWindow: 8388608

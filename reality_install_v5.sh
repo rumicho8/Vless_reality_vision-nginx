@@ -856,6 +856,8 @@ EOF
     bash "$SCRIPT_DIR/update-dat.sh" 2>&1 | tee -a "$LOG_FILE"
     echo -e "${C_BLUE}--------------------------------${C_RESET}"
 
+    crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
+
     cat > /etc/systemd/system/xray-dat.service <<EOF
 [Unit]
 Description=Xray Dat Database Updater
@@ -982,7 +984,7 @@ while true; do
             systemctl daemon-reload
             rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
             rm -rf /var/www/html/{*,.[!.]*,..?*} "$XRAY_CONF_DIR" "$XRAY_SHARE_DIR" "$SCRIPT_DIR" /etc/hysteria /etc/nginx/ssl /root/.acme.sh 2>/dev/null
-            
+            crontab -l 2>/dev/null | grep -vF "update-dat.sh" | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
             echo -e "\n${C_YELLOW}架构级文件已擦除。(备注：系统级网络调优 BBR 与日志限制策略已保留)${C_RESET}"
             echo -e "${C_RED}[WARN] 警告：是否执行深度清理，彻底抹除底层系统依赖 (Nginx, Socat, qrencode, jq)？${C_RESET}"
             read -rp "若当前实例承载其他 Web 业务，请务必输入 N 拒绝！[y/N, 默认 N]: " SCORCHED_EARTH

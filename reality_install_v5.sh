@@ -65,8 +65,8 @@ get_domain_info() {
     local dot_count=$(echo "$domain" | tr -cd '.' | wc -c)
     
     if [[ "$domain" == www.* ]]; then
-        # 输入 www.example.com -> 返回 "www.example.com example.com"
-        echo "$domain ${domain#www.}"
+        # 输入 www.example.com -> 返回 "example.com www.example.com"
+        echo "${domain#www.} $domain"
     elif [ "$dot_count" -eq 1 ]; then
         # 输入 example.com -> 返回 "example.com www.example.com"
         echo "$domain www.$domain"
@@ -333,7 +333,8 @@ module_issue_cert() {
     local acme_bin="/root/.acme.sh/acme.sh"
 
     # [修改] 动态获取需要签发的域名列表并构建参数
-    local domains=$(get_domain_list "$domain")
+    local domains=$(get_domain_info "$domain")
+    local primary_domain=$(echo "$domains" | awk '{print $1}')
     local acme_args=""
     for d in $domains; do acme_args="$acme_args -d $d"; done
 
@@ -357,7 +358,7 @@ module_issue_cert() {
             local acme_temp_conf="/etc/nginx/sites-enabled/acme_temp"
             CLEANUP_LIST+=("$acme_temp_conf")
             
-            # [修改] 这里的 server_name 也要同步动态化，确保所有解析的域名都能通过 80 端口验证[cite: 3]
+            # [修改] 这里的 server_name 同步动态化，确保所有解析的域名都能通过 80 端口验证
             cat > "$acme_temp_conf" <<EOF
 server {
     listen 80;
@@ -367,18 +368,18 @@ server {
 }
 EOF
             systemctl restart nginx >/dev/null 2>&1 || systemctl start nginx >/dev/null 2>&1
-            # [修改] 使用动态生成的 acme_args[cite: 3]
+            # [修改] 使用动态生成的 acme_args
             "$acme_bin" --issue $acme_args --webroot /var/www/html --keylength ec-256 $GLOBAL_CERT_MODE
             rm -f "$acme_temp_conf"
         else
-            # [修改] DNS 模式同样使用动态参数，避免泛域名解析在某些二级域名下的尴尬[cite: 3]
+            # [修改] DNS 模式同样使用动态参数，避免泛域名解析在某些二级域名下的尴尬
             "$acme_bin" --issue --dns "$api" $acme_args --keylength ec-256 $GLOBAL_CERT_MODE
         fi
         
         local reload_cmd="systemctl reload nginx || true"
 
-        # [注意] --install-cert 仍以原始输入 domain 作为主域名索引
-        "$acme_bin" --install-cert -d "$domain" --ecc \
+        # [注意] --install-cert 改为主域名索引以匹配 acme.sh 签发逻辑
+        "$acme_bin" --install-cert -d "$primary_domain" --ecc \
             --key-file "/etc/nginx/ssl/${domain}_ecc.key" \
             --fullchain-file "$cert_file" \
             --reloadcmd "$reload_cmd"
@@ -406,7 +407,7 @@ EOF
 module_config_nginx() {
     local domain=$1
     # [修改] 动态获取域名列表
-    local domains=$(get_domain_list "$domain")
+    local domains=$(get_domain_info "$domain")
     
     log_info "正在编译 Nginx 全局调度配置..."
 
@@ -481,7 +482,7 @@ server {
 server {
     listen 80;
     listen [::]:80;
-    # [修改] 使用动态域名列表[cite: 3]
+    # [修改] 使用动态域名列表
     server_name $domains;
     return 301 https://\$host\$request_uri;
 }
@@ -492,7 +493,7 @@ EOF
         cat >> "$tmp_conf" <<EOF
 server {
     listen 127.0.0.1:8444;
-    # [修改] 使用动态域名列表[cite: 3]
+    # [修改] 使用动态域名列表
     server_name $domains;
 
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
@@ -510,7 +511,7 @@ EOF
     fi
 
     mv -f "$tmp_conf" /etc/nginx/sites-available/xray
-    ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/[cite: 2]
+    ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/
     
     if ! nginx -t >/dev/null 2>&1; then
         rm -f /etc/nginx/sites-enabled/xray
@@ -544,7 +545,7 @@ EOF
     fi
 
     systemctl enable nginx >/dev/null 2>&1
-    systemctl reload nginx || systemctl restart nginx || log_err "Nginx 守护进程唤醒失败。"[cite: 2]
+    systemctl reload nginx || systemctl restart nginx || log_err "Nginx 守护进程唤醒失败。"
     log_ok "Nginx 代理网关已上线。"
 }
 
@@ -633,7 +634,7 @@ module_config_xray() {
     mkdir -p "$XRAY_CONF_DIR"
 
     # [修改重点] 动态构建 serverNames JSON 数组
-    local domains=$(get_domain_list "$domain")
+    local domains=$(get_domain_info "$domain")
     local server_names_json=$(echo "$domains" | sed 's/ /", "/g; s/^/["/; s/$/"]/')
     
     local dest_addr="127.0.0.1:8443"
@@ -977,7 +978,7 @@ main_install() {
     module_setup_bbr
     
     if [[ "$GLOBAL_INSTALL_MODE" == "1" || "$GLOBAL_INSTALL_MODE" == "3" ]]; then
-        # 严格控制流：1.签发证书(内含80端口Webroot环境) 2.加载完整443配置[cite: 2]
+        # 严格控制流：1.签发证书(内含80端口Webroot环境) 2.加载完整443配置
         module_issue_cert "$GLOBAL_DOMAIN" "$GLOBAL_DNS_API"
         module_config_nginx "$GLOBAL_DOMAIN"
     else

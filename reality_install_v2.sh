@@ -709,6 +709,7 @@ Description=Watch TLS certificate changes for Hysteria2
 [Path]
 # 证书场景必须用 PathChanged（兼容 acme.sh 的 mv 替换）
 PathChanged=/etc/nginx/ssl/${domain}_ecc.cer
+PathChanged=/etc/nginx/ssl/${domain}_ecc.key
 
 [Install]
 WantedBy=multi-user.target
@@ -733,15 +734,34 @@ Type=oneshot
 # 4. hysteria 用 restart（目前无热重载）
 
 ExecStart=/bin/bash -c ' \
-exec 9>/tmp/hysteria-cert.lock; \
+cert_file="/etc/nginx/ssl/${domain}_ecc.cer"; \
+key_file="/etc/nginx/ssl/${domain}_ecc.key"; \
+\
+exec 9>/run/hysteria-cert.lock; \
 flock -n 9 || exit 0; \
-for i in 1 2 3 4 5; do \
-    [ -s /etc/nginx/ssl/${domain}_ecc.cer ] && break; \
+\
+# 1. 循环校验证书合法性（最多等待 10 秒）
+valid=0; \
+for i in \$(seq 1 10); do \
+    if [[ -s "\$cert_file" ]] && openssl x509 -in "\$cert_file" -noout >/dev/null 2>&1; then \
+        valid=1; break; \
+    fi; \
     sleep 1; \
 done; \
-systemctl reload nginx; \
-systemctl restart hysteria-server; \
-'
+\
+# 2. 只有合法才执行后续操作
+if [ \$valid -eq 1 ]; then \
+    # 兼容性 Nginx 处理：运行中 reload，未运行则 start
+    if systemctl is-active --quiet nginx; then \
+        systemctl reload nginx; \
+    else \
+        systemctl start nginx; \
+    fi; \
+    # 重启 Hysteria2
+    systemctl restart hysteria-server; \
+else \
+    echo "证书校验失败或文件未就绪，跳过重启。"; \
+fi; '
 EOF
 
     cat > /etc/systemd/system/hysteria-server.service <<EOF

@@ -331,23 +331,21 @@ module_issue_cert() {
             log_err "ACME 套件拉取超时，请排查网络出站连通性。"
         fi
         
-        if [[ "$api" == "webroot" ]]; then
-            # 1. 建立临时验证环境：Nginx 只监听 80 端口（无 SSL 依赖）[cite: 2]
-            cat > /etc/nginx/sites-enabled/acme_temp <<EOF
+     if [[ "$api" == "webroot" ]]; then
+            local acme_temp_conf="/etc/nginx/sites-enabled/acme_temp"
+            CLEANUP_LIST+=("$acme_temp_conf") # 注册清理
+            
+            cat > "$acme_temp_conf" <<EOF
 server {
     listen 80;
     listen [::]:80;
     server_name $domain www.$domain;
-    location / {
-        root /var/www/html;
-    }
+    location / { root /var/www/html; }
 }
 EOF
             systemctl restart nginx >/dev/null 2>&1 || systemctl start nginx >/dev/null 2>&1
-            # 2. 执行 Webroot 模式签发[cite: 2]
             "$acme_bin" --issue -d "$domain" -d "www.$domain" --webroot /var/www/html --keylength ec-256 $GLOBAL_CERT_MODE
-            # 3. 签发完成后移除临时配置
-            rm -f /etc/nginx/sites-enabled/acme_temp
+            rm -f "$acme_temp_conf" # 正常结束则手动清理
         else
             "$acme_bin" --issue --dns "$api" -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE
         fi
@@ -681,11 +679,20 @@ module_install_hysteria() {
     local hy2_url="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy2_arch}"
     
     echo -e "${C_BLUE}--- 构建 Hysteria2 二进制 ---${C_RESET}"
-    curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 120 \
-          -o /usr/local/bin/hysteria "$hy2_url" \
-          && [[ -s /usr/local/bin/hysteria ]] \
-          && chmod +x /usr/local/bin/hysteria \
-          || log_err "Hysteria2 核心拉取异常。"
+# 新增：建立临时工作区并加入清理列表
+    local tmp_hy2="/tmp/hy2_build_$(date +%s)"
+    CLEANUP_LIST+=("$tmp_hy2")
+    mkdir -p "$tmp_hy2"
+
+    if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 120 \
+          -o "$tmp_hy2/hysteria" "$hy2_url" \
+          && [[ -s "$tmp_hy2/hysteria" ]]; then
+        chmod +x "$tmp_hy2/hysteria"
+        mv -f "$tmp_hy2/hysteria" /usr/local/bin/hysteria
+        log_ok "Hysteria2 核心拉取成功。"
+    else
+        log_err "Hysteria2 核心拉取异常。"
+    fi
     echo -e "${C_BLUE}-----------------------------${C_RESET}"
 
     mkdir -p /etc/hysteria

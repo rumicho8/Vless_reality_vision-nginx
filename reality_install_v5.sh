@@ -59,6 +59,23 @@ echo $$ > "$LOCK_FILE"
 CLEANUP_LIST=()
 trap '[[ ${#CLEANUP_LIST[@]} -gt 0 ]] && rm -rf "${CLEANUP_LIST[@]}" 2>/dev/null' EXIT SIGHUP SIGINT SIGTERM
 
+# [新增] 域名智能解析辅助函数
+get_domain_info() {
+    local domain=$1
+    local dot_count=$(echo "$domain" | tr -cd '.' | wc -c)
+    
+    if [[ "$domain" == www.* ]]; then
+        # 输入 www.example.com -> 返回 "www.example.com example.com"
+        echo "$domain ${domain#www.}"
+    elif [ "$dot_count" -eq 1 ]; then
+        # 输入 example.com -> 返回 "example.com www.example.com"
+        echo "$domain www.$domain"
+    else
+        # 输入 vps.example.com -> 返回 "vps.example.com"
+        echo "$domain"
+    fi
+}
+
 # ==============================================================================
 # GROUP 2: 日志引擎与交互展示层 (Loggers & Interactive UI)
 # ==============================================================================
@@ -110,7 +127,7 @@ module_get_inputs() {
 
     if [[ "$GLOBAL_INSTALL_MODE" == "1" || "$GLOBAL_INSTALL_MODE" == "3" ]]; then
         read -rp "请输入已解析至当前服务器公网 IP 的域名 (例如 my.domain.com): " GLOBAL_DOMAIN
-        GLOBAL_DOMAIN=$(echo "$GLOBAL_DOMAIN" | sed 's/^www\.//g' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        GLOBAL_DOMAIN=$(echo "$GLOBAL_DOMAIN" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
         
         [[ -z "$GLOBAL_DOMAIN" ]] && log_err "域名参数为空或格式异常。"
         
@@ -315,6 +332,11 @@ module_issue_cert() {
     local cert_file="/etc/nginx/ssl/${domain}_ecc.cer"
     local acme_bin="/root/.acme.sh/acme.sh"
 
+    # [修改] 动态获取需要签发的域名列表并构建参数
+    local domains=$(get_domain_list "$domain")
+    local acme_args=""
+    for d in $domains; do acme_args="$acme_args -d $d"; done
+
     if [[ ! -s "$cert_file" ]]; then
         log_info "正在通过 ACME 协议向 Let's Encrypt 发起 TLS 证书签发请求 ($domain)..."
         
@@ -331,28 +353,31 @@ module_issue_cert() {
             log_err "ACME 套件拉取超时，请排查网络出站连通性。"
         fi
         
-     if [[ "$api" == "webroot" ]]; then
+        if [[ "$api" == "webroot" ]]; then
             local acme_temp_conf="/etc/nginx/sites-enabled/acme_temp"
-            CLEANUP_LIST+=("$acme_temp_conf") # 注册清理
+            CLEANUP_LIST+=("$acme_temp_conf")
             
+            # [修改] 这里的 server_name 也要同步动态化，确保所有解析的域名都能通过 80 端口验证[cite: 3]
             cat > "$acme_temp_conf" <<EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name $domain www.$domain;
+    server_name $domains;
     location / { root /var/www/html; }
 }
 EOF
             systemctl restart nginx >/dev/null 2>&1 || systemctl start nginx >/dev/null 2>&1
-            "$acme_bin" --issue -d "$domain" -d "www.$domain" --webroot /var/www/html --keylength ec-256 $GLOBAL_CERT_MODE
-            rm -f "$acme_temp_conf" # 正常结束则手动清理
+            # [修改] 使用动态生成的 acme_args[cite: 3]
+            "$acme_bin" --issue $acme_args --webroot /var/www/html --keylength ec-256 $GLOBAL_CERT_MODE
+            rm -f "$acme_temp_conf"
         else
-            "$acme_bin" --issue --dns "$api" -d "$domain" -d "*.$domain" --keylength ec-256 $GLOBAL_CERT_MODE
+            # [修改] DNS 模式同样使用动态参数，避免泛域名解析在某些二级域名下的尴尬[cite: 3]
+            "$acme_bin" --issue --dns "$api" $acme_args --keylength ec-256 $GLOBAL_CERT_MODE
         fi
         
-        # 动态构建证书下发后的服务重载指令 (已解耦，完全交由 .path 监听)
         local reload_cmd="systemctl reload nginx || true"
 
+        # [注意] --install-cert 仍以原始输入 domain 作为主域名索引
         "$acme_bin" --install-cert -d "$domain" --ecc \
             --key-file "/etc/nginx/ssl/${domain}_ecc.key" \
             --fullchain-file "$cert_file" \
@@ -380,6 +405,9 @@ EOF
 
 module_config_nginx() {
     local domain=$1
+    # [修改] 动态获取域名列表
+    local domains=$(get_domain_list "$domain")
+    
     log_info "正在编译 Nginx 全局调度配置..."
 
     cat > /etc/nginx/nginx.conf <<'EOF'
@@ -438,7 +466,8 @@ server {
     ${listen_directive}
     ssl_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
-    server_name $domain www.$domain;
+    # [修改] 使用动态域名列表
+    server_name $domains;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
@@ -452,7 +481,8 @@ server {
 server {
     listen 80;
     listen [::]:80;
-    server_name $domain www.$domain;
+    # [修改] 使用动态域名列表[cite: 3]
+    server_name $domains;
     return 301 https://\$host\$request_uri;
 }
 EOF
@@ -462,7 +492,8 @@ EOF
         cat >> "$tmp_conf" <<EOF
 server {
     listen 127.0.0.1:8444;
-    server_name $domain www.$domain;
+    # [修改] 使用动态域名列表[cite: 3]
+    server_name $domains;
 
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff always;
@@ -479,8 +510,7 @@ EOF
     fi
 
     mv -f "$tmp_conf" /etc/nginx/sites-available/xray
-    # 加载 443 配置（软链接）[cite: 2]
-    ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/
+    ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/[cite: 2]
     
     if ! nginx -t >/dev/null 2>&1; then
         rm -f /etc/nginx/sites-enabled/xray
@@ -514,8 +544,7 @@ EOF
     fi
 
     systemctl enable nginx >/dev/null 2>&1
-    # reload nginx[cite: 2]
-    systemctl reload nginx || systemctl restart nginx || log_err "Nginx 守护进程唤醒失败。"
+    systemctl reload nginx || systemctl restart nginx || log_err "Nginx 守护进程唤醒失败。"[cite: 2]
     log_ok "Nginx 代理网关已上线。"
 }
 
@@ -602,9 +631,20 @@ module_config_xray() {
     log_ok "X25519 密钥对生成器执行成功。"
     
     mkdir -p "$XRAY_CONF_DIR"
-    local dest_addr="127.0.0.1:8443"; local server_names_json="[\"$domain\", \"www.$domain\"]"
-    [[ "$GLOBAL_INSTALL_MODE" == "2" ]] && { dest_addr="$GLOBAL_PUBLIC_SNI:443"; server_names_json="[\"$GLOBAL_PUBLIC_SNI\"]"; }
+
+    # [修改重点] 动态构建 serverNames JSON 数组
+    local domains=$(get_domain_list "$domain")
+    local server_names_json=$(echo "$domains" | sed 's/ /", "/g; s/^/["/; s/$/"]/')
     
+    local dest_addr="127.0.0.1:8443"
+    
+    # 模式 2 (公网 SNI 模式) 的特殊逻辑保持不变
+    [[ "$GLOBAL_INSTALL_MODE" == "2" ]] && { 
+        dest_addr="$GLOBAL_PUBLIC_SNI:443"
+        server_names_json="[\"$GLOBAL_PUBLIC_SNI\"]" 
+    }
+    
+    # 后续生成配置文件的逻辑保持不变，确保使用了 $server_names_json 变量
     cat > "$XRAY_CONFIG" <<EOF
 {
   "log": { "loglevel": "warning" },
@@ -714,7 +754,7 @@ masquerade:
   type: proxy
   proxy:
     url: http://127.0.0.1:8444
-    rewriteHost: true
+    rewriteHost: false
 
 quic:
   initStreamReceiveWindow: 8388608

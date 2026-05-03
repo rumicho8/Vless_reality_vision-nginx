@@ -49,13 +49,14 @@ GLOBAL_PORT=""
 HY2_PASSWORD=""
 
 # 进程互斥锁检测
-if [[ -f "$LOCK_FILE" ]]; then
-    echo -e "${C_RED}[ERROR] 安装程序已在运行中 (PID: $(cat "$LOCK_FILE"))，请勿重复执行。${C_RESET}"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo -e "${C_RED}[ERROR] 安装程序已在运行中 (PID: $(cat "$LOCK_FILE" 2>/dev/null))，请勿重复执行。${C_RESET}"
     exit 1
 fi
 echo $$ > "$LOCK_FILE"
 
-CLEANUP_LIST=("$LOCK_FILE")
+CLEANUP_LIST=()
 trap '[[ ${#CLEANUP_LIST[@]} -gt 0 ]] && rm -rf "${CLEANUP_LIST[@]}" 2>/dev/null' EXIT SIGHUP SIGINT SIGTERM
 
 # ==============================================================================

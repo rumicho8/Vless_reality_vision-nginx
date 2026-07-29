@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Xray Reality Automation Engine (Stability Edition V5)
+# Xray Reality Automation Engine (Stability Edition V2)
 # Architecture: VLESS + XTLS-Vision + Reality + Nginx Reverse Proxy + Hysteria2
 # ==============================================================================
 
@@ -14,7 +14,7 @@ fi
 # ==============================================================================
 # GROUP 1: 全局变量与环境声明 (Globals & Traps)
 # ==============================================================================
-readonly SCRIPT_VERSION="Pro Final V5 (Stability Edition)"
+readonly SCRIPT_VERSION="Pro Final V2 (Stability Edition)"
 readonly LOG_FILE="/dev/null"
 readonly LOCK_FILE="/var/run/xray_script.lock"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"

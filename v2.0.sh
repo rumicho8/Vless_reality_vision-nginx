@@ -686,8 +686,7 @@ module_config_xray() {
         "serverNames": $server_names_json,
         "privateKey": "$PRIV",
         "shortIds": ["$SID"]
-      },
-      "alpn": ["h2", "http/1.1"]
+      }
     }
   }],
   "outbounds": [

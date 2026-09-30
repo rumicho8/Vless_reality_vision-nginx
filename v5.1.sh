@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Xray Reality Automation Engine (Industrial Architecture Edition - V6.5 Final)
+# Xray Reality Automation Engine (Industrial Architecture Edition - V6.7 Verified)
 # Architecture: VLESS + XTLS-Vision + Reality + Nginx Reverse Proxy + Hysteria2
 # ==============================================================================
 
@@ -13,7 +13,7 @@ if [[ $EUID -ne 0 ]]; then
     [[ "${BASH_SOURCE[0]}" != "${0}" ]] && return 1 2>/dev/null || exit 1
 fi
 
-readonly SCRIPT_VERSION="6.5-Industrial-Final"
+readonly SCRIPT_VERSION="6.7-Industrial-Verified"
 readonly LOG_FILE="/dev/null"
 readonly LOCK_FILE="/var/run/xray_script.lock"
 readonly SCRIPT_DIR="/usr/local/etc/xray-script"
@@ -83,14 +83,12 @@ safe_terminate() {
     [[ "${BASH_SOURCE[0]}" != "${0}" ]] && return "$code" 2>/dev/null || exit "$code"
 }
 
-# 进程并发互斥锁与信号拦截
-exec 9>"$LOCK_FILE"
+# 进程并发互斥锁（采用追加模式与绝对互斥判定，杜绝截断穿透）
+exec 9>>"$LOCK_FILE"
 if ! flock -n 9; then
     ACTIVE_PID=$(cat "$LOCK_FILE" 2>/dev/null)
-    if [[ -n "$ACTIVE_PID" && "$ACTIVE_PID" != "$$" ]]; then
-        echo -e "${C_RED}[ERROR] 检测到已有安装程序正在运行 (PID: $ACTIVE_PID)，请勿重复执行。${C_RESET}"
-        safe_terminate 1
-    fi
+    echo -e "${C_RED}[ERROR] 检测到已有安装程序正在运行 (PID: ${ACTIVE_PID:-未知})，请勿重复执行。${C_RESET}"
+    safe_terminate 1
 fi
 echo $$ > "$LOCK_FILE"
 
@@ -192,6 +190,14 @@ fw_apply_nftables() {
     systemctl enable nftables >/dev/null 2>&1 || true
 }
 
+firewall_flush_nftables_table() {
+    if [[ "${CTX[fw_backend]}" == "nftables" ]]; then
+        nft add table inet xray_gateway 2>/dev/null || true
+        nft flush table inet xray_gateway 2>/dev/null || true
+        nft 'add chain inet xray_gateway input { type filter hook input priority 0; policy accept; }' 2>/dev/null || true
+    fi
+}
+
 fw_apply_iptables() {
     local action="$1" port="$2" proto="$3"
     if [[ "$action" == "allow" ]]; then
@@ -212,7 +218,7 @@ firewall_rule() {
 }
 
 firewall_purge_nftables() {
-    if [[ "${CTX[fw_backend]}" == "nftables" ]]; then
+    if command -v nft >/dev/null 2>&1; then
         nft delete table inet xray_gateway 2>/dev/null || true
         rm -f /etc/nftables.d/xray.nft
         [[ -f /etc/nftables.conf ]] && sed -i '\|include "/etc/nftables.d/\*.nft"|d' /etc/nftables.conf 2>/dev/null || true
@@ -369,7 +375,6 @@ driver_cert_purge() {
     unit_purge "xray-acme.timer" "xray-acme.service"
     rm -rf /root/.acme.sh /etc/nginx/ssl 2>/dev/null || true
     crontab -l 2>/dev/null | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
-    # 彻底清除 root 用户 .bashrc 中残留的 acme 别名声明
     sed -i '/\.acme\.sh/d' /root/.bashrc 2>/dev/null || true
     sed -i '/acme\.sh/d' /root/.bashrc 2>/dev/null || true
     log_ok "证书组件与续签任务清理完成。"
@@ -496,7 +501,6 @@ server {
 EOF
     fi
 
-    # 模式 3 特有的 8444 本地回落服务
     if [[ "${CTX[mode]}" == "3" ]]; then
         cat >> "$tmp_conf" <<EOF
 server {
@@ -545,6 +549,7 @@ EOF
             [[ -n "$inner_dir" ]] && cp -a "$inner_dir"/. "$target_dir/" 2>/dev/null
             log_ok "伪装网页部署成功。"
         fi
+        rm -rf "$temp_extract" "$zip_file" 2>/dev/null || true
     fi
 
     if [[ ! -s "$target_dir/index.html" ]]; then
@@ -561,20 +566,25 @@ EOF
     log_ok "Nginx 伪装网关配置完成。"
 }
 
-driver_nginx_purge() {
-    log_info "正在物理清退 Nginx、伪装站、日志及关联组件依赖..."
+driver_nginx_clean_site() {
+    log_info "正在清理 Nginx 业务站点与伪装网页..."
     systemctl stop nginx >/dev/null 2>&1 || true
     systemctl disable nginx >/dev/null 2>&1 || true
+    rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray /etc/nginx/sites-enabled/acme_temp
+    rm -rf /var/www/html/* /var/www/html/.[!.]* 2>/dev/null || true
+    log_ok "Nginx 业务配置与站点文件已清理。"
+}
 
+driver_nginx_purge_package() {
+    log_info "正在物理清退 Nginx、系统包依赖与历史日志..."
+    driver_nginx_clean_site
     if command -v nginx >/dev/null 2>&1 || [[ -f /lib/systemd/system/nginx.service ]]; then
         apt-get purge -yqq nginx nginx-common socat >/dev/null 2>&1 || true
         apt-get autoremove -yqq >/dev/null 2>&1
     fi
-
-    # 物理擦除配置文件、站点目录及 Nginx 历史运行日志
-    rm -rf /etc/nginx /var/www/html /var/www /var/log/nginx 2>/dev/null || true
+    rm -rf /etc/nginx /var/www /var/log/nginx 2>/dev/null || true
     systemctl daemon-reload >/dev/null 2>&1 || true
-    log_ok "Nginx 及其关联依赖与历史日志已彻底清除。"
+    log_ok "Nginx 软件包与系统配置已连根拔除。"
 }
 
 # --- [Driver: Xray Core 代理引擎] ---
@@ -673,8 +683,8 @@ driver_xray_configure() {
     "queryStrategy": "UseIP",
     "disableFallback": true,
     "hosts": {
-      "dns.google": ["8.8.8.8", "8.8.4.4"],
-      "dns.cloudflare.com": ["1.1.1.1", "1.0.0.1"]
+      "dns.google": ["2001:4860:4860::8888", "2001:4860:4860::8844", "8.8.8.8", "8.8.4.4"],
+      "dns.cloudflare.com": ["2606:4700:4700::1111", "2606:4700:4700::1001", "1.1.1.1", "1.0.0.1"]
     },
     "servers": [
       { "address": "https://dns.cloudflare.com/dns-query" },
@@ -754,7 +764,7 @@ driver_hysteria_install() {
     CTX[hy2_pass]=$(openssl rand -hex 16)
 
     cat > "$HY2_CONFIG" <<EOF
-listen: :${CTX[port]}
+listen: ":${CTX[port]}"
 tls:
   cert: /etc/nginx/ssl/${domain}_ecc.cer
   key:  /etc/nginx/ssl/${domain}_ecc.key
@@ -792,11 +802,12 @@ EOF
     cat > "$SCRIPT_DIR/hysteria-cert-restart.sh" <<EOF
 #!/bin/bash
 cert_file="/etc/nginx/ssl/${domain}_ecc.cer"
+key_file="/etc/nginx/ssl/${domain}_ecc.key"
 exec 9>/run/hysteria-cert.lock
 flock -n 9 || exit 0
 valid=0
 for i in \$(seq 1 10); do
-    if [[ -s "\$cert_file" ]] && openssl x509 -in "\$cert_file" -noout >/dev/null 2>&1; then
+    if [[ -s "\$cert_file" && -s "\$key_file" ]] && openssl x509 -in "\$cert_file" -noout >/dev/null 2>&1; then
         valid=1
         break
     fi
@@ -814,6 +825,7 @@ EOF
 Description=Reload Nginx and Restart Hysteria2 on certificate change
 ConditionPathExists=$HY2_CONFIG
 ConditionPathExists=/etc/nginx/ssl/${domain}_ecc.cer
+ConditionPathExists=/etc/nginx/ssl/${domain}_ecc.key
 
 [Service]
 Type=oneshot
@@ -826,6 +838,7 @@ Description=Hysteria2 Server Service
 After=network.target
 ConditionPathExists=$HY2_CONFIG
 ConditionPathExists=/etc/nginx/ssl/${domain}_ecc.cer
+ConditionPathExists=/etc/nginx/ssl/${domain}_ecc.key
 
 [Service]
 Type=simple
@@ -1044,7 +1057,7 @@ workflow_align_modes() {
     [[ "${CTX[mode]}" != "3" ]] && driver_hysteria_purge
     if [[ "${CTX[mode]}" == "2" ]]; then
         driver_cert_purge
-        driver_nginx_purge
+        driver_nginx_purge_package
     fi
 }
 
@@ -1082,7 +1095,8 @@ workflow_deploy() {
     apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" $install_pkgs >/dev/null 2>&1
     mkdir -p "$SCRIPT_DIR"
 
-    # 防火墙精准回收与规则重载
+    firewall_flush_nftables_table
+
     if [[ -n "${CTX[old_port]}" && "${CTX[old_port]}" != "${CTX[port]}" ]]; then
         firewall_rule "deny" "${CTX[old_port]}" "tcp"
         firewall_rule "deny" "${CTX[old_port]}" "udp"
@@ -1210,7 +1224,7 @@ workflow_uninstall() {
     driver_hysteria_purge
     driver_rules_dat_purge
     driver_cert_purge
-    driver_nginx_purge
+    driver_nginx_clean_site
     rm -rf "$SCRIPT_DIR"
 
     echo -e "\n${C_YELLOW}所有核心业务文件、节点配置与端口放行已彻底回收。${C_RESET}"
@@ -1218,14 +1232,14 @@ workflow_uninstall() {
     read -rp "如果服务器还承载其他业务，请选 N！[y/N, 默认 N]: " PURGE_SYS
     case "${PURGE_SYS}" in
         [yY][eE][sS]|[yY])
-            local purge_list="nginx nginx-common socat qrencode jq unzip"
+            driver_nginx_purge_package
+            local purge_list="socat qrencode jq unzip"
             apt-get purge -yqq $purge_list >/dev/null 2>&1
-            rm -rf /etc/nginx
             sys_clean_apt_cache
             echo -e "${C_GREEN}[OK] 底层运行依赖包已彻底清除 (已保留 curl、BBR 与日志策略)。${C_RESET}"
             ;;
         *)
-            echo -e "${C_GREEN}[OK] 已保留底层公共基础软件。${C_RESET}"
+            echo -e "${C_GREEN}[OK] 已保留底层公共基础软件 (Nginx 服务已停止，未删除系统包)。${C_RESET}"
             ;;
     esac
     read -rp "按回车键返回主菜单..."

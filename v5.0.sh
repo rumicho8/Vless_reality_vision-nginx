@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# Xray Reality Automation Engine (Industrial Architecture Edition)
-# Pattern: Strategy Pattern + Factory Pattern + Decoupled Template Engine
+# Xray Reality Automation Engine (Industrial Architecture Edition - V6.3)
+# Architecture: VLESS + XTLS-Vision + Reality + Nginx Reverse Proxy + Hysteria2
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -13,7 +13,7 @@ if [[ $EUID -ne 0 ]]; then
     [[ "${BASH_SOURCE[0]}" != "${0}" ]] && return 1 2>/dev/null || exit 1
 fi
 
-readonly SCRIPT_VERSION="6.1-Industrial"
+readonly SCRIPT_VERSION="6.3-Industrial"
 readonly LOG_FILE="/dev/null"
 readonly LOCK_FILE="/var/run/xray_script.lock"
 readonly SCRIPT_DIR="/usr/local/etc/xray-script"
@@ -40,7 +40,6 @@ export DEBUG=0
 export DEBIAN_FRONTEND="noninteractive"
 export APT_LISTCHANGES_FRONTEND="none"
 
-# 运行时全局状态字典聚合
 declare -gA CTX=(
     [mode]="1"
     [domain]=""
@@ -84,7 +83,7 @@ safe_terminate() {
     [[ "${BASH_SOURCE[0]}" != "${0}" ]] && return "$code" 2>/dev/null || exit "$code"
 }
 
-# 进程并发防冲锁与信号拦截
+# 进程并发互斥锁
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     ACTIVE_PID=$(cat "$LOCK_FILE" 2>/dev/null)
@@ -101,7 +100,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     trap 'cleanup_resources; exit 143' TERM
 fi
 
-# 通用文件原子落盘函数
 write_file() {
     local path="$1"
     local content="$2"
@@ -141,55 +139,8 @@ get_domain_info() {
 }
 
 # ------------------------------------------------------------------------------
-# LAYER 2: 工厂模式与策略基础设施 (Factory & Strategy Infrastructure)
+# LAYER 2: 基础设施与防火墙策略 (Infrastructure & Firewall Strategy)
 # ------------------------------------------------------------------------------
-systemd_unit_factory() {
-    local unit_name="$1"
-    local desc="$2"
-    local exec_cmd="$3"
-    local type="${4:-simple}"
-    local extra_service="${5:-}"
-    local extra_unit="${6:-}"
-
-    local content="[Unit]
-Description=$desc
-After=network.target nss-lookup.target
-$extra_unit
-
-[Service]
-Type=$type
-ExecStart=$exec_cmd
-Restart=on-failure
-RestartSec=3s
-LimitNOFILE=1048576
-$extra_service
-
-[Install]
-WantedBy=multi-user.target"
-
-    write_file "/etc/systemd/system/${unit_name}" "$content" 644
-}
-
-systemd_timer_factory() {
-    local timer_name="$1"
-    local desc="$2"
-    local on_calendar="$3"
-    local random_delay="${4:-5m}"
-
-    local content="[Unit]
-Description=$desc
-
-[Timer]
-OnCalendar=$on_calendar
-Persistent=true
-RandomizedDelaySec=$random_delay
-
-[Install]
-WantedBy=timers.target"
-
-    write_file "/etc/systemd/system/${timer_name}" "$content" 644
-}
-
 unit_purge() {
     local units=("$@")
     [[ ${#units[@]} -eq 0 ]] && return 0
@@ -278,11 +229,12 @@ firewall_purge_nftables() {
 
 sys_setup_journald() {
     log_info "正在配置系统环境和日志策略..."
-    local content="[Journal]
+    cat > /etc/systemd/journald.conf.d/99-prophet.conf <<'EOF'
+[Journal]
 SystemMaxUse=100M
 MaxRetentionSec=7day
-ForwardToSyslog=no"
-    write_file "/etc/systemd/journald.conf.d/99-prophet.conf" "$content" 644
+ForwardToSyslog=no
+EOF
     systemctl restart systemd-journald || true
 }
 
@@ -319,10 +271,122 @@ sys_clean_apt_cache() {
 }
 
 # ------------------------------------------------------------------------------
-# LAYER 3: 纯文本配置渲染引擎 (Decoupled Template Rendering Engines)
+# LAYER 3: 业务组件驱动 (Component Lifecycle Drivers)
 # ------------------------------------------------------------------------------
-render_nginx_main_conf() {
-    cat <<'EOF'
+
+# --- [Driver: ACME 证书管理] ---
+driver_cert_install() {
+    local domain="${CTX[domain]}"
+    local api="${CTX[dns_api]}"
+    local cert_file="/etc/nginx/ssl/${domain}_ecc.cer"
+    local domains
+    domains=$(get_domain_info "$domain")
+    local primary_domain
+    primary_domain=$(echo "$domains" | awk '{print $1}')
+    local acme_args=""
+    for d in $domains; do acme_args="$acme_args -d $d"; done
+
+    if [[ -s "$cert_file" ]]; then
+        log_info "检测到服务器已存在有效证书，跳过申请步骤直接复用。"
+        return 0
+    fi
+
+    log_info "正在向 Let's Encrypt 申请 TLS 证书 ($domain)..."
+    local tmp_acme="/tmp/acme_$(date +%s)"
+    CLEANUP_LIST+=("$tmp_acme")
+    mkdir -p "$tmp_acme" && cd "$tmp_acme" || log_err "创建临时工作目录失败。"
+
+    if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}" --nocron && [[ -s "$ACME_BIN" ]]; then
+        log_ok "证书申请工具 (ACME) 安装成功。"
+        "$ACME_BIN" --upgrade --auto-upgrade "$AUTO_UPGRADE" >/dev/null 2>&1
+    else
+        log_err "证书申请工具安装失败，请检查网络连接。"
+    fi
+
+    if [[ "$api" == "webroot" ]]; then
+        local acme_temp_conf="/etc/nginx/sites-enabled/acme_temp"
+        CLEANUP_LIST+=("$acme_temp_conf")
+        cat > "$acme_temp_conf" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domains;
+    location / { root /var/www/html; }
+}
+EOF
+        systemctl restart nginx >/dev/null 2>&1 || systemctl start nginx >/dev/null 2>&1
+        "$ACME_BIN" --issue $acme_args --webroot /var/www/html --keylength ec-256 ${CTX[cert_mode]}
+        rm -f "$acme_temp_conf"
+    else
+        "$ACME_BIN" --issue --dns "$api" $acme_args --keylength ec-256 ${CTX[cert_mode]}
+    fi
+
+    "$ACME_BIN" --install-cert -d "$primary_domain" --ecc \
+        --key-file "/etc/nginx/ssl/${domain}_ecc.key" \
+        --fullchain-file "$cert_file" \
+        --reloadcmd "systemctl reload nginx || true"
+
+    cd "$HOME" || true
+
+    if [[ -s "$cert_file" ]]; then
+        log_ok "TLS 证书申请成功并部署到 Nginx。"
+        local acme_conf="/root/.acme.sh/account.conf"
+        if [[ -f "$acme_conf" ]]; then
+            grep -q "LE_NO_LOG" "$acme_conf" || echo "LE_NO_LOG='1'" >> "$acme_conf"
+            grep -q "LE_LOG_FILE" "$acme_conf" || echo "LE_LOG_FILE='/dev/null'" >> "$acme_conf"
+            grep -q "DEBUG" "$acme_conf" || echo "DEBUG='0'" >> "$acme_conf"
+        fi
+    else
+        log_err "证书申请失败，请检查域名解析与服务商密钥。"
+    fi
+}
+
+driver_cert_setup_timer() {
+    cat > /etc/systemd/system/xray-acme.service <<EOF
+[Unit]
+Description=Acme.sh Certificate Renewal Daemon
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=$ACME_BIN --cron --home /root/.acme.sh
+LimitNOFILE=1048576
+EOF
+
+    cat > /etc/systemd/system/xray-acme.timer <<EOF
+[Unit]
+Description=Timer for Acme.sh Renewal (SGT)
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 Asia/Singapore
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now xray-acme.timer >/dev/null 2>&1
+}
+
+driver_cert_purge() {
+    unit_purge "xray-acme.timer" "xray-acme.service"
+    rm -rf /root/.acme.sh /etc/nginx/ssl 2>/dev/null || true
+    crontab -l 2>/dev/null | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
+}
+
+# --- [Driver: Nginx 伪装网关] ---
+driver_nginx_install() {
+    local domain="${CTX[domain]}"
+    local domains
+    domains=$(get_domain_info "$domain")
+
+    if [[ ! -s "/etc/nginx/ssl/${domain}_ecc.cer" || ! -s "/etc/nginx/ssl/${domain}_ecc.key" ]]; then
+        log_err "Nginx 关联的证书文件不存在 (/etc/nginx/ssl/${domain}_ecc.cer)，请检查证书申请步骤。"
+    fi
+
+    log_info "正在配置 Nginx 主程序与安全策略..."
+    cat > /etc/nginx/nginx.conf <<'EOF'
 user www-data;
 worker_processes auto;
 pid /run/nginx.pid;
@@ -348,62 +412,81 @@ http {
   include /etc/nginx/sites-enabled/*;
 }
 EOF
-}
+    rm -f /etc/nginx/sites-enabled/default
 
-render_nginx_vhost_conf() {
-    local domain="$1"
-    local domains="$2"
-    local has_reject="$3"
-    local has_http2="$4"
-    local dns_api="$5"
-    local mode="$6"
+    local has_reject=0
+    local probe_conf="/tmp/ngx_probe.conf"
+    cat > "$probe_conf" <<'EOF'
+events {}
+http { server { listen 127.0.0.1:8443 ssl; ssl_reject_handshake on; } }
+EOF
+    nginx -t -c "$probe_conf" >/dev/null 2>&1 && has_reject=1
 
-    local listen_block="listen 127.0.0.1:8443 ssl http2;"
-    if [[ "$has_http2" == "1" ]]; then
-        listen_block="listen 127.0.0.1:8443 ssl;
-    http2 on;"
-    fi
+    local has_http2=0
+    cat > "$probe_conf" <<'EOF'
+events {}
+http { server { http2 on; } }
+EOF
+    nginx -t -c "$probe_conf" >/dev/null 2>&1 && has_http2=1
+    rm -f "$probe_conf"
 
-    local common_security="add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains\" always;
-    add_header X-Content-Type-Options nosniff always;
-    add_header Referrer-Policy strict-origin-when-cross-origin always;
-    add_header X-Frame-Options SAMEORIGIN always;
-    location / {
-        root /var/www/html;
-        index index.html;
-        try_files \$uri \$uri/ =404;
-    }"
+    local tmp_conf="/tmp/xray_nginx.conf"
+    rm -f "$tmp_conf"
 
-    [[ "$has_reject" == "1" ]] && cat <<EOF
+    if [[ $has_reject -eq 1 ]]; then
+        cat >> "$tmp_conf" <<EOF
 server {
     listen 127.0.0.1:8443 ssl default_server;
     server_name _;
     ssl_reject_handshake on;
 }
 EOF
+    fi
 
-    cat <<EOF
+    local listen_directive="listen 127.0.0.1:8443 ssl http2;"
+    if [[ $has_http2 -eq 1 ]]; then
+        listen_directive="listen 127.0.0.1:8443 ssl;
+    http2 on;"
+    fi
+
+    cat >> "$tmp_conf" <<EOF
 server {
-    ${listen_block}
+    ${listen_directive}
     ssl_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
     server_name $domains;
-    ${common_security}
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header X-Frame-Options SAMEORIGIN always;
+
+    location / {
+        root /var/www/html;
+        index index.html;
+        try_files \$uri \$uri/ =404;
+    }
 }
 EOF
 
-    if [[ "$dns_api" == "webroot" ]]; then
-        cat <<EOF
+    if [[ "${CTX[dns_api]}" == "webroot" ]]; then
+        cat >> "$tmp_conf" <<EOF
 server {
     listen 80;
     listen [::]:80;
     server_name $domains;
-    location ^~ /.well-known/acme-challenge/ { root /var/www/html; }
-    location / { return 301 https://\$host\$request_uri; }
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
 }
 EOF
     else
-        cat <<EOF
+        cat >> "$tmp_conf" <<EOF
 server {
     listen 80;
     listen [::]:80;
@@ -413,26 +496,165 @@ server {
 EOF
     fi
 
-    if [[ "$mode" == "3" ]]; then
-        cat <<EOF
+    if [[ "${CTX[mode]}" == "3" ]]; then
+        cat >> "$tmp_conf" <<EOF
 server {
     listen 127.0.0.1:8444 default_server;
     server_name $domains;
-    ${common_security}
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header X-Frame-Options SAMEORIGIN always;
+
+    location / {
+        root /var/www/html;
+        index index.html;
+        try_files \$uri \$uri/ =404;
+    }
 }
 EOF
     fi
+
+    mv -f "$tmp_conf" /etc/nginx/sites-available/xray
+    ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/
+
+    local test_err
+    if ! test_err=$(nginx -t 2>&1); then
+        echo -e "${C_RED}=================== NGINX 语法校验错误详情 ===================${C_RESET}"
+        echo -e "${test_err}"
+        echo -e "${C_RED}==============================================================${C_RESET}"
+        cat -n /etc/nginx/sites-available/xray
+        rm -f /etc/nginx/sites-enabled/xray
+        log_err "Nginx 配置文件校验失败，错误原因已详细打印在上方。"
+    fi
+
+    local target_dir="/var/www/html"
+    local temp_extract="/tmp/web_temp_$(date +%s)"
+    local zip_file="/tmp/web_template.zip"
+    CLEANUP_LIST+=("$temp_extract" "$zip_file")
+    mkdir -p "$target_dir"
+    rm -rf "${target_dir:?}/"* "${target_dir:?}/".[!.]* 2>/dev/null
+
+    if fetch_asset "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main" "$zip_file" 120 && [[ -s "$zip_file" ]]; then
+        mkdir -p "$temp_extract"
+        if unzip -qo "$zip_file" -d "$temp_extract"; then
+            local inner_dir
+            inner_dir=$(find "$temp_extract" -mindepth 1 -maxdepth 1 -type d | head -n1)
+            [[ -n "$inner_dir" ]] && cp -a "$inner_dir"/. "$target_dir/" 2>/dev/null
+            log_ok "伪装网页部署成功。"
+        fi
+    fi
+
+    if [[ ! -s "$target_dir/index.html" ]]; then
+        cat > "$target_dir/index.html" <<'EOF'
+<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body style="background-color:black;color:white;text-align:center;padding-top:20%"><p>403 Forbidden</p><hr><p>nginx</p></body></html>
+EOF
+    fi
+
+    systemctl enable nginx >/dev/null 2>&1
+    systemctl restart nginx || log_err "Nginx 服务重载失败。"
+    log_ok "Nginx 伪装网关配置完成。"
 }
 
-render_xray_conf() {
+driver_nginx_purge() {
+    systemctl stop nginx >/dev/null 2>&1 || true
+    systemctl disable nginx >/dev/null 2>&1 || true
+    rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
+    rm -rf /var/www/html/* /var/www/html/.[!.]* 2>/dev/null || true
+}
+
+# --- [Driver: Xray Core 代理引擎] ---
+driver_xray_install() {
+    log_info "正在下载 Xray 核心组件..."
+    local arch_xray="64"
+    [[ "${CTX[arch]}" == "arm64" ]] && arch_xray="arm64-v8a"
+
+    local tmp_xray="/tmp/xray_build_$(date +%s)"
+    CLEANUP_LIST+=("$tmp_xray")
+    mkdir -p "$tmp_xray" && cd "$tmp_xray"
+
+    local zip_name="Xray-linux-${arch_xray}.zip"
+    fetch_asset "https://github.com/XTLS/Xray-core/releases/latest/download/${zip_name}" "$zip_name" 120 || log_err "Xray 核心下载失败。"
+    unzip -qo "$zip_name" || log_err "Xray 核心解压失败。"
+
+    mv -f xray "$XRAY_BIN" && chmod +x "$XRAY_BIN"
+    mkdir -p "$XRAY_SHARE_DIR" "$XRAY_CONF_DIR"
+    mv -f geoip.dat geosite.dat "$XRAY_SHARE_DIR/" 2>/dev/null || true
+
+    # 原生落盘，彻底杜绝转义与 bad unit file setting 错误
+    cat > /etc/systemd/system/xray.service <<EOF
+[Unit]
+Description=Xray Service
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+User=root
+Environment="XRAY_LOCATION_ASSET=$XRAY_SHARE_DIR"
+ExecStart=$XRAY_BIN run -config $XRAY_CONFIG
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 /etc/systemd/system/xray.service
+    systemctl daemon-reload
+    cd "$HOME" && rm -rf "$tmp_xray"
+    log_ok "Xray 核心及 Systemd 服务配置完成。"
+}
+
+driver_xray_configure() {
+    local domain="${CTX[domain]}"
+    log_info "正在生成 Xray 配置文件和加密密钥..."
+
+    if [[ -f "$XRAY_CONFIG" ]]; then
+        CTX[uuid]=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONFIG" 2>/dev/null)
+        CTX[priv_key]=$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' "$XRAY_CONFIG" 2>/dev/null)
+        CTX[short_id]=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0]' "$XRAY_CONFIG" 2>/dev/null)
+    fi
+
+    [[ -z "${CTX[uuid]}" || "${CTX[uuid]}" == "null" ]] && CTX[uuid]=$($XRAY_BIN uuid)
+    [[ -z "${CTX[short_id]}" || "${CTX[short_id]}" == "null" ]] && CTX[short_id]=$(openssl rand -hex 8)
+
+    if [[ -n "${CTX[priv_key]}" && "${CTX[priv_key]}" != "null" ]]; then
+        CTX[pub_key]=$($XRAY_BIN x25519 -i "${CTX[priv_key]}" 2>/dev/null | grep -iE "Public|Password" | grep -oE '[A-Za-z0-9_-]{43}' | head -n1)
+    fi
+
+    if [[ -z "${CTX[priv_key]}" || "${CTX[priv_key]}" == "null" || -z "${CTX[pub_key]}" || "${CTX[pub_key]}" == "null" ]]; then
+        local key_re="$($XRAY_BIN x25519 | tr -d '\r')"
+        mapfile -t KEYS < <(echo "$key_re" | grep -iE "Private|Public|Password" | grep -oE '[A-Za-z0-9_-]{43}')
+        CTX[priv_key]=""; CTX[pub_key]=""
+        for p_priv in "${KEYS[@]}"; do
+            local calc_pub
+            calc_pub=$($XRAY_BIN x25519 -i "$p_priv" 2>/dev/null | grep -iE "Public|Password" | grep -oE '[A-Za-z0-9_-]{43}' | head -n1)
+            for p_pub in "${KEYS[@]}"; do
+                if [[ "$calc_pub" == "$p_pub" && "$p_priv" != "$p_pub" ]]; then
+                    CTX[priv_key]="$p_priv"; CTX[pub_key]="$p_pub"; break 2
+                fi
+            done
+        done
+    fi
+
+    local dest_addr="127.0.0.1:8443"
+    local server_names_json
+    if [[ "${CTX[mode]}" == "2" ]]; then
+        dest_addr="${CTX[public_sni]}:443"
+        server_names_json="[\"${CTX[public_sni]}\"]"
+    else
+        local domains
+        domains=$(get_domain_info "$domain")
+        server_names_json=$(echo "$domains" | sed 's/ /", "/g; s/^/["/; s/$/"]/')
+    fi
+
     local port="${CTX[port]}"
     local uuid="${CTX[uuid]}"
-    local dest_addr="$1"
-    local server_names_json="$2"
     local priv="${CTX[priv_key]}"
     local sid="${CTX[short_id]}"
 
-    cat <<EOF
+    cat > "$XRAY_CONFIG" <<EOF
 {
   "log": { "loglevel": "warning" },
   "dns": {
@@ -482,276 +704,20 @@ render_xray_conf() {
   }
 }
 EOF
-}
-
-render_hy2_conf() {
-    local domain="${CTX[domain]}"
-    local port="${CTX[port]}"
-    local pass="${CTX[hy2_pass]}"
-
-    cat <<EOF
-listen: :$port
-tls:
-  cert: /etc/nginx/ssl/${domain}_ecc.cer
-  key:  /etc/nginx/ssl/${domain}_ecc.key
-auth:
-  type: password
-  password: $pass
-masquerade:
-  type: proxy
-  proxy:
-    url: http://127.0.0.1:8444
-    rewriteHost: true
-quic:
-  initStreamReceiveWindow: 8388608
-  maxStreamReceiveWindow: 8388608
-  ignorePacketLoss: false
-bandwidth:
-  up: 300 mbps
-  down: 300 mbps
-EOF
-}
-
-# ------------------------------------------------------------------------------
-# LAYER 4: 业务组件驱动 (Component Lifecycle Drivers)
-# ------------------------------------------------------------------------------
-
-# --- [Driver: ACME 证书管理] ---
-driver_cert_install() {
-    local domain="${CTX[domain]}"
-    local api="${CTX[dns_api]}"
-    local cert_file="/etc/nginx/ssl/${domain}_ecc.cer"
-    local domains
-    domains=$(get_domain_info "$domain")
-    local primary_domain
-    primary_domain=$(echo "$domains" | awk '{print $1}')
-    local acme_args=""
-    for d in $domains; do acme_args="$acme_args -d $d"; done
-
-    if [[ -s "$cert_file" ]]; then
-        log_info "检测到服务器已存在有效证书，跳过申请步骤直接复用。"
-        return 0
-    fi
-
-    log_info "正在向 Let's Encrypt 申请 TLS 证书 ($domain)..."
-    local tmp_acme="/tmp/acme_$(date +%s)"
-    CLEANUP_LIST+=("$tmp_acme")
-    mkdir -p "$tmp_acme" && cd "$tmp_acme" || log_err "创建临时工作目录失败。"
-
-    if curl -fL -# --connect-timeout 10 --retry 5 --retry-delay 3 --retry-connrefused -m 60 https://get.acme.sh | sh -s email="admin@${domain}" --nocron && [[ -s "$ACME_BIN" ]]; then
-        log_ok "证书申请工具 (ACME) 安装成功。"
-        "$ACME_BIN" --upgrade --auto-upgrade "$AUTO_UPGRADE" >/dev/null 2>&1
-    else
-        log_err "证书申请工具安装失败，请检查网络连接。"
-    fi
-
-    if [[ "$api" == "webroot" ]]; then
-        local acme_temp_conf="/etc/nginx/sites-enabled/acme_temp"
-        CLEANUP_LIST+=("$acme_temp_conf")
-        local temp_block="server {
-    listen 80;
-    listen [::]:80;
-    server_name $domains;
-    location / { root /var/www/html; }
-}"
-        write_file "$acme_temp_conf" "$temp_block" 644
-        systemctl restart nginx >/dev/null 2>&1 || systemctl start nginx >/dev/null 2>&1
-        "$ACME_BIN" --issue $acme_args --webroot /var/www/html --keylength ec-256 ${CTX[cert_mode]}
-        rm -f "$acme_temp_conf"
-    else
-        "$ACME_BIN" --issue --dns "$api" $acme_args --keylength ec-256 ${CTX[cert_mode]}
-    fi
-
-    "$ACME_BIN" --install-cert -d "$primary_domain" --ecc \
-        --key-file "/etc/nginx/ssl/${domain}_ecc.key" \
-        --fullchain-file "$cert_file" \
-        --reloadcmd "systemctl reload nginx || true"
-
-    cd "$HOME" || true
-
-    if [[ -s "$cert_file" ]]; then
-        log_ok "TLS 证书申请成功并部署到 Nginx。"
-        local acme_conf="/root/.acme.sh/account.conf"
-        if [[ -f "$acme_conf" ]]; then
-            grep -q "LE_NO_LOG" "$acme_conf" || echo "LE_NO_LOG='1'" >> "$acme_conf"
-            grep -q "LE_LOG_FILE" "$acme_conf" || echo "LE_LOG_FILE='/dev/null'" >> "$acme_conf"
-            grep -q "DEBUG" "$acme_conf" || echo "DEBUG='0'" >> "$acme_conf"
-        fi
-    else
-        log_err "证书申请失败，请查看上方 acme 报错信息。"
-    fi
-}
-
-driver_cert_setup_timer() {
-    systemd_unit_factory "xray-acme.service" "Acme.sh Certificate Renewal Daemon" "$ACME_BIN --cron --home /root/.acme.sh" "oneshot" "User=root"
-    systemd_timer_factory "xray-acme.timer" "Timer for Acme.sh Renewal (SGT)" "*-*-* 02:00:00 Asia/Singapore" "5m"
-    systemctl daemon-reload
-    systemctl enable --now xray-acme.timer >/dev/null 2>&1
-}
-
-driver_cert_purge() {
-    unit_purge "xray-acme.timer" "xray-acme.service"
-    rm -rf /root/.acme.sh /etc/nginx/ssl 2>/dev/null || true
-    crontab -l 2>/dev/null | grep -vE "acme\.sh.*--cron" | crontab - 2>/dev/null || true
-}
-
-# --- [Driver: Nginx 伪装网关] ---
-driver_nginx_detect_features() {
-    local tmp_probe
-    tmp_probe=$(mktemp /tmp/ngx_probe_XXXXXX.conf)
-    CLEANUP_LIST+=("$tmp_probe")
-
-    local has_reject=0
-    write_file "$tmp_probe" "events {} http { server { listen 127.0.0.1:8443 ssl; ssl_reject_handshake on; } }" 644
-    nginx -t -c "$tmp_probe" >/dev/null 2>&1 && has_reject=1
-
-    local has_http2_directive=0
-    write_file "$tmp_probe" "events {} http { server { http2 on; } }" 644
-    nginx -t -c "$tmp_probe" >/dev/null 2>&1 && has_http2_directive=1
-    rm -f "$tmp_probe"
-
-    echo "${has_reject}|${has_http2_directive}"
-}
-
-driver_nginx_install() {
-    local domain="${CTX[domain]}"
-    local domains
-    domains=$(get_domain_info "$domain")
-
-    # 证书物理文件存在性前置自检
-    if [[ ! -s "/etc/nginx/ssl/${domain}_ecc.cer" || ! -s "/etc/nginx/ssl/${domain}_ecc.key" ]]; then
-        log_err "Nginx 关联的证书文件不存在 (/etc/nginx/ssl/${domain}_ecc.cer)，请检查证书申请步骤。"
-    fi
-
-    log_info "正在配置 Nginx 主程序与安全策略..."
-    write_file "/etc/nginx/nginx.conf" "$(render_nginx_main_conf)" 644
-    rm -f /etc/nginx/sites-enabled/default
-
-    local probe_res has_reject has_http2
-    probe_res=$(driver_nginx_detect_features)
-    has_reject="${probe_res%%|*}"
-    has_http2="${probe_res#*|}"
-
-    local vhost_conf
-    vhost_conf=$(render_nginx_vhost_conf "$domain" "$domains" "$has_reject" "$has_http2" "${CTX[dns_api]}" "${CTX[mode]}")
-    write_file "/etc/nginx/sites-available/xray" "$vhost_conf" 644
-    ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/
-
-    local test_err
-    if ! test_err=$(nginx -t 2>&1); then
-        rm -f /etc/nginx/sites-enabled/xray
-        echo -e "${C_RED}${test_err}${C_RESET}"
-        log_err "Nginx 配置文件校验失败，具体报错已打印在上方。"
-    fi
-
-    # 部署伪装网站资源
-    local target_dir="/var/www/html"
-    local temp_extract="/tmp/web_temp_$(date +%s)"
-    local zip_file="/tmp/web_template.zip"
-    CLEANUP_LIST+=("$temp_extract" "$zip_file")
-    mkdir -p "$target_dir"
-    rm -rf "${target_dir:?}/"* "${target_dir:?}/".[!.]* 2>/dev/null
-
-    if fetch_asset "https://codeload.github.com/rumicho8/Nginx-3DCEList/zip/refs/heads/main" "$zip_file" 120 && [[ -s "$zip_file" ]]; then
-        mkdir -p "$temp_extract"
-        if unzip -qo "$zip_file" -d "$temp_extract"; then
-            local inner_dir
-            inner_dir=$(find "$temp_extract" -mindepth 1 -maxdepth 1 -type d | head -n1)
-            [[ -n "$inner_dir" ]] && cp -a "$inner_dir"/. "$target_dir/" 2>/dev/null
-            log_ok "伪装网页部署成功。"
-        fi
-    fi
-
-    if [[ ! -s "$target_dir/index.html" ]]; then
-        write_file "$target_dir/index.html" '<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body style="background-color:black;color:white;text-align:center;padding-top:20%"><p>403 Forbidden</p><hr><p>nginx</p></body></html>' 644
-    fi
-
-    systemctl enable nginx >/dev/null 2>&1
-    systemctl restart nginx || log_err "Nginx 服务重载失败。"
-    log_ok "Nginx 伪装网关配置完成。"
-}
-
-driver_nginx_purge() {
-    systemctl stop nginx >/dev/null 2>&1 || true
-    systemctl disable nginx >/dev/null 2>&1 || true
-    rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
-    rm -rf /var/www/html/* /var/www/html/.[!.]* 2>/dev/null || true
-}
-
-# --- [Driver: Xray Core 代理引擎] ---
-driver_xray_install() {
-    log_info "正在下载 Xray 核心组件..."
-    local arch_xray="64"
-    [[ "${CTX[arch]}" == "arm64" ]] && arch_xray="arm64-v8a"
-
-    local tmp_xray="/tmp/xray_build_$(date +%s)"
-    CLEANUP_LIST+=("$tmp_xray")
-    mkdir -p "$tmp_xray" && cd "$tmp_xray"
-
-    local zip_name="Xray-linux-${arch_xray}.zip"
-    fetch_asset "https://github.com/XTLS/Xray-core/releases/latest/download/${zip_name}" "$zip_name" 120 || log_err "Xray 核心下载失败。"
-    unzip -qo "$zip_name" || log_err "Xray 核心解压失败。"
-
-    mv -f xray "$XRAY_BIN" && chmod +x "$XRAY_BIN"
-    mkdir -p "$XRAY_SHARE_DIR" "$XRAY_CONF_DIR"
-    mv -f geoip.dat geosite.dat "$XRAY_SHARE_DIR/" 2>/dev/null || true
-
-    systemd_unit_factory "xray.service" "Xray Service" "$XRAY_BIN run -config $XRAY_CONFIG" "simple" "User=root\nEnvironment=\"XRAY_LOCATION_ASSET=$XRAY_SHARE_DIR\""
-    systemctl daemon-reload
-    cd "$HOME" && rm -rf "$tmp_xray"
-    log_ok "Xray 核心及 Systemd 服务配置完成。"
-}
-
-driver_xray_configure() {
-    local domain="${CTX[domain]}"
-    log_info "正在生成 Xray 配置文件和加密密钥..."
-
-    if [[ -f "$XRAY_CONFIG" ]]; then
-        CTX[uuid]=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONFIG" 2>/dev/null)
-        CTX[priv_key]=$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' "$XRAY_CONFIG" 2>/dev/null)
-        CTX[short_id]=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0]' "$XRAY_CONFIG" 2>/dev/null)
-    fi
-
-    [[ -z "${CTX[uuid]}" || "${CTX[uuid]}" == "null" ]] && CTX[uuid]=$($XRAY_BIN uuid)
-    [[ -z "${CTX[short_id]}" || "${CTX[short_id]}" == "null" ]] && CTX[short_id]=$(openssl rand -hex 8)
-
-    if [[ -n "${CTX[priv_key]}" && "${CTX[priv_key]}" != "null" ]]; then
-        CTX[pub_key]=$($XRAY_BIN x25519 -i "${CTX[priv_key]}" 2>/dev/null | grep -iE "Public|Password" | grep -oE '[A-Za-z0-9_-]{43}' | head -n1)
-    fi
-
-    if [[ -z "${CTX[priv_key]}" || "${CTX[priv_key]}" == "null" || -z "${CTX[pub_key]}" || "${CTX[pub_key]}" == "null" ]]; then
-        local key_re="$($XRAY_BIN x25519 | tr -d '\r')"
-        mapfile -t KEYS < <(echo "$key_re" | grep -iE "Private|Public|Password" | grep -oE '[A-Za-z0-9_-]{43}')
-        CTX[priv_key]=""; CTX[pub_key]=""
-        for p_priv in "${KEYS[@]}"; do
-            local calc_pub
-            calc_pub=$($XRAY_BIN x25519 -i "$p_priv" 2>/dev/null | grep -iE "Public|Password" | grep -oE '[A-Za-z0-9_-]{43}' | head -n1)
-            for p_pub in "${KEYS[@]}"; do
-                if [[ "$calc_pub" == "$p_pub" && "$p_priv" != "$p_pub" ]]; then
-                    CTX[priv_key]="$p_priv"; CTX[pub_key]="$p_pub"; break 2
-                fi
-            done
-        done
-    fi
-
-    local dest_addr="127.0.0.1:8443"
-    local server_names_json
-    if [[ "${CTX[mode]}" == "2" ]]; then
-        dest_addr="${CTX[public_sni]}:443"
-        server_names_json="[\"${CTX[public_sni]}\"]"
-    else
-        local domains
-        domains=$(get_domain_info "$domain")
-        server_names_json=$(echo "$domains" | sed 's/ /", "/g; s/^/["/; s/$/"]/')
-    fi
-
-    local xray_json
-    xray_json=$(render_xray_conf "$dest_addr" "$server_names_json")
-    write_file "$XRAY_CONFIG" "$xray_json" 600
     chmod 700 "$XRAY_CONF_DIR"
+    chmod 600 "$XRAY_CONFIG"
+
+    # 启动前执行核心语法静态测试
+    local test_res
+    if ! test_res=$("$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>&1); then
+        echo -e "${C_RED}=================== XRAY 配置语法测试报错 ===================${C_RESET}"
+        echo -e "${test_res}"
+        echo -e "${C_RED}============================================================${C_RESET}"
+        log_err "Xray 配置文件验证失败，错误详情已打印在上方。"
+    fi
 
     systemctl enable xray >/dev/null 2>&1
-    systemctl restart xray || log_err "Xray 启动失败，请检查配置文件格式。"
+    systemctl restart xray || log_err "Xray 服务启动失败，请使用 journalctl -u xray -e 查看底层日志。"
     log_ok "Xray 服务与节点规则配置成功。"
 }
 
@@ -776,25 +742,50 @@ driver_hysteria_install() {
     mkdir -p "$HY2_CONF_DIR"
     CTX[hy2_pass]=$(openssl rand -hex 16)
 
-    write_file "$HY2_CONFIG" "$(render_hy2_conf)" 600
+    cat > "$HY2_CONFIG" <<EOF
+listen: :${CTX[port]}
+tls:
+  cert: /etc/nginx/ssl/${domain}_ecc.cer
+  key:  /etc/nginx/ssl/${domain}_ecc.key
+auth:
+  type: password
+  password: ${CTX[hy2_pass]}
+masquerade:
+  type: proxy
+  proxy:
+    url: http://127.0.0.1:8444
+    rewriteHost: true
+quic:
+  initStreamReceiveWindow: 8388608
+  maxStreamReceiveWindow: 8388608
+  ignorePacketLoss: false
+bandwidth:
+  up: 300 mbps
+  down: 300 mbps
+EOF
     chmod 700 "$HY2_CONF_DIR"
+    chmod 600 "$HY2_CONFIG"
 
-    local path_unit="[Unit]
+    cat > /etc/systemd/system/hysteria-cert-watcher.path <<EOF
+[Unit]
 Description=Watch TLS certificate changes for Hysteria2
+
 [Path]
 PathChanged=/etc/nginx/ssl/${domain}_ecc.cer
 PathChanged=/etc/nginx/ssl/${domain}_ecc.key
-[Install]
-WantedBy=multi-user.target"
-    write_file "/etc/systemd/system/hysteria-cert-watcher.path" "$path_unit" 644
 
-    local restart_script="#!/bin/bash
-cert_file=\"/etc/nginx/ssl/${domain}_ecc.cer\"
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    cat > "$SCRIPT_DIR/hysteria-cert-restart.sh" <<EOF
+#!/bin/bash
+cert_file="/etc/nginx/ssl/${domain}_ecc.cer"
 exec 9>/run/hysteria-cert.lock
 flock -n 9 || exit 0
 valid=0
 for i in \$(seq 1 10); do
-    if [[ -s \"\$cert_file\" ]] && openssl x509 -in \"\$cert_file\" -noout >/dev/null 2>&1; then
+    if [[ -s "\$cert_file" ]] && openssl x509 -in "\$cert_file" -noout >/dev/null 2>&1; then
         valid=1
         break
     fi
@@ -803,11 +794,39 @@ done
 if [[ \$valid -eq 1 ]]; then
     systemctl is-active --quiet nginx && systemctl reload nginx || systemctl start nginx
     systemctl restart hysteria-server
-fi"
-    write_file "$SCRIPT_DIR/hysteria-cert-restart.sh" "$restart_script" 755
+fi
+EOF
+    chmod 755 "$SCRIPT_DIR/hysteria-cert-restart.sh"
 
-    systemd_unit_factory "hysteria-cert-watcher.service" "Reload Nginx and Restart Hysteria2 on certificate change" "$SCRIPT_DIR/hysteria-cert-restart.sh" "oneshot" "" "ConditionPathExists=$HY2_CONFIG\nConditionPathExists=/etc/nginx/ssl/${domain}_ecc.cer"
-    systemd_unit_factory "hysteria-server.service" "Hysteria2 Server Service" "$HY2_BIN server -c $HY2_CONFIG" "simple" "Environment=HYSTERIA_LOG_LEVEL=warn" "ConditionPathExists=$HY2_CONFIG\nConditionPathExists=/etc/nginx/ssl/${domain}_ecc.cer"
+    cat > /etc/systemd/system/hysteria-cert-watcher.service <<EOF
+[Unit]
+Description=Reload Nginx and Restart Hysteria2 on certificate change
+ConditionPathExists=$HY2_CONFIG
+ConditionPathExists=/etc/nginx/ssl/${domain}_ecc.cer
+
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_DIR/hysteria-cert-restart.sh
+EOF
+
+    cat > /etc/systemd/system/hysteria-server.service <<EOF
+[Unit]
+Description=Hysteria2 Server Service
+After=network.target
+ConditionPathExists=$HY2_CONFIG
+ConditionPathExists=/etc/nginx/ssl/${domain}_ecc.cer
+
+[Service]
+Type=simple
+ExecStart=$HY2_BIN server -c $HY2_CONFIG
+Environment=HYSTERIA_LOG_LEVEL=warn
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
     systemctl daemon-reload
     systemctl enable --now hysteria-cert-watcher.path >/dev/null 2>&1
@@ -824,7 +843,8 @@ driver_hysteria_purge() {
 # --- [Driver: 路由分流规则自动化更新] ---
 driver_rules_dat_setup() {
     log_info "正在配置路由规则库自动更新任务..."
-    local updater_script='#!/bin/bash
+    cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
+#!/bin/bash
 exec 9> /var/lock/xray-dat.lock
 flock -n 9 || exit 0
 SHARE_DIR="/usr/local/share/xray"
@@ -849,13 +869,34 @@ update_file() {
 update_file "geoip.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 update_file "geosite.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 
-[[ $changed -eq 1 ]] && systemctl restart xray >/dev/null 2>&1 || true'
-
-    write_file "$SCRIPT_DIR/update-dat.sh" "$updater_script" 755
+[[ $changed -eq 1 ]] && systemctl restart xray >/dev/null 2>&1 || true
+EOF
+    chmod 755 "$SCRIPT_DIR/update-dat.sh"
     bash "$SCRIPT_DIR/update-dat.sh" >/dev/null 2>&1 || true
 
-    systemd_unit_factory "xray-dat.service" "Xray Dat Database Updater" "$SCRIPT_DIR/update-dat.sh" "oneshot" "User=root"
-    systemd_timer_factory "xray-dat.timer" "Timer for Xray Dat Update (SGT)" "Mon *-*-* 03:00:00 Asia/Singapore" "10m"
+    cat > /etc/systemd/system/xray-dat.service <<EOF
+[Unit]
+Description=Xray Dat Database Updater
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=$SCRIPT_DIR/update-dat.sh
+LimitNOFILE=1048576
+EOF
+
+    cat > /etc/systemd/system/xray-dat.timer <<EOF
+[Unit]
+Description=Timer for Xray Dat Update (SGT)
+
+[Timer]
+OnCalendar=Mon *-*-* 03:00:00 Asia/Singapore
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
+EOF
 
     systemctl daemon-reload
     systemctl enable --now xray-dat.timer >/dev/null 2>&1
@@ -868,7 +909,7 @@ driver_rules_dat_purge() {
 }
 
 # ------------------------------------------------------------------------------
-# LAYER 5: 业务交互与流程编排 (Workflow Orchestration & Prompts)
+# LAYER 4: 业务交互与流程编排 (Workflow Orchestration & Prompts)
 # ------------------------------------------------------------------------------
 workflow_fetch_host_ips() {
     CTX[ipv4]=$(curl -s4m 5 icanhazip.com || curl -s4m 5 ifconfig.me || true)
@@ -999,17 +1040,15 @@ workflow_deploy() {
     rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
     dpkg --configure -a >/dev/null 2>&1 || true
 
-    # 前置停止旧服务，防止覆盖安装时端口检测自锁冲突
+    # 停止已有服务释放端口，避免占用误判
     systemctl stop xray hysteria-server >/dev/null 2>&1 || true
     command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1 || true
 
-    # 前置依赖自检与补齐，防止交互测试 DNS 时缺少 jq/curl
     if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
         apt-get update -yqq >/dev/null 2>&1
         apt-get install -yqq --no-install-recommends curl jq >/dev/null 2>&1
     fi
 
-    # 架构自检与防火墙驱动绑定
     local arch_raw
     arch_raw=$(dpkg --print-architecture 2>/dev/null || uname -m)
     case "$arch_raw" in
@@ -1031,7 +1070,6 @@ workflow_deploy() {
     apt-get install -yqq --no-install-recommends -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" $install_pkgs >/dev/null 2>&1
     mkdir -p "$SCRIPT_DIR"
 
-    # 防火墙动态规则调度
     if [[ -n "${CTX[old_port]}" && "${CTX[old_port]}" != "${CTX[port]}" ]]; then
         firewall_rule "deny" "${CTX[old_port]}" "tcp"
         firewall_rule "deny" "${CTX[old_port]}" "udp"
@@ -1157,7 +1195,7 @@ workflow_uninstall() {
 }
 
 # ------------------------------------------------------------------------------
-# LAYER 6: CLI 入口与调度菜单 (Main Menu & Entrypoint)
+# LAYER 5: CLI 入口与调度菜单 (Main Menu & Entrypoint)
 # ------------------------------------------------------------------------------
 while true; do
     clear

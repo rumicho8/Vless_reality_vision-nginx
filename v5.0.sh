@@ -13,7 +13,7 @@ if [[ $EUID -ne 0 ]]; then
     [[ "${BASH_SOURCE[0]}" != "${0}" ]] && return 1 2>/dev/null || exit 1
 fi
 
-readonly SCRIPT_VERSION="6.0-Industrial"
+readonly SCRIPT_VERSION="6.1-Industrial"
 readonly LOG_FILE="/dev/null"
 readonly LOCK_FILE="/var/run/xray_script.lock"
 readonly SCRIPT_DIR="/usr/local/etc/xray-script"
@@ -40,7 +40,7 @@ export DEBUG=0
 export DEBIAN_FRONTEND="noninteractive"
 export APT_LISTCHANGES_FRONTEND="none"
 
-# [解耦 1: Context Object 字典化] 运行时全局状态字典聚合
+# 运行时全局状态字典聚合
 declare -gA CTX=(
     [mode]="1"
     [domain]=""
@@ -101,7 +101,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     trap 'cleanup_resources; exit 143' TERM
 fi
 
-# 通用文件原子落盘函数 (解耦渲染与 IO 写入及权限设置)
+# 通用文件原子落盘函数
 write_file() {
     local path="$1"
     local content="$2"
@@ -143,8 +143,6 @@ get_domain_info() {
 # ------------------------------------------------------------------------------
 # LAYER 2: 工厂模式与策略基础设施 (Factory & Strategy Infrastructure)
 # ------------------------------------------------------------------------------
-
-# [解耦 2: Systemd 单元工厂] 工厂化统一生成标准守护单元与定时器
 systemd_unit_factory() {
     local unit_name="$1"
     local desc="$2"
@@ -203,7 +201,6 @@ unit_purge() {
     systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
-# [解耦 3: 防火墙策略模式] 单次探测并根据绑定驱动执行动态分发
 detect_firewall_backend() {
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -qw active; then
         CTX[fw_backend]="ufw"
@@ -324,8 +321,6 @@ sys_clean_apt_cache() {
 # ------------------------------------------------------------------------------
 # LAYER 3: 纯文本配置渲染引擎 (Decoupled Template Rendering Engines)
 # ------------------------------------------------------------------------------
-
-# [解耦 4: 渲染与 IO 分离] 将长文本模版完全抽象为独立函数
 render_nginx_main_conf() {
     cat <<'EOF'
 user www-data;
@@ -358,10 +353,16 @@ EOF
 render_nginx_vhost_conf() {
     local domain="$1"
     local domains="$2"
-    local listen_dir="$3"
-    local has_reject="$4"
+    local has_reject="$3"
+    local has_http2="$4"
     local dns_api="$5"
     local mode="$6"
+
+    local listen_block="listen 127.0.0.1:8443 ssl http2;"
+    if [[ "$has_http2" == "1" ]]; then
+        listen_block="listen 127.0.0.1:8443 ssl;
+    http2 on;"
+    fi
 
     local common_security="add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains\" always;
     add_header X-Content-Type-Options nosniff always;
@@ -383,7 +384,7 @@ EOF
 
     cat <<EOF
 server {
-    ${listen_dir}
+    ${listen_block}
     ssl_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
     server_name $domains;
@@ -438,8 +439,8 @@ render_xray_conf() {
     "queryStrategy": "UseIP",
     "disableFallback": true,
     "hosts": {
-      "dns.google": ["8.8.8.8", "8.8.4.4"],
-      "dns.cloudflare.com": ["1.1.1.1", "1.0.0.1"]
+      "dns.google": ["2001:4860:4860::8888", "2001:4860:4860::8844", "8.8.8.8", "8.8.4.4"],
+      "dns.cloudflare.com": ["2606:4700:4700::1111", "2606:4700:4700::1001", "1.1.1.1", "1.0.0.1"]
     },
     "servers": [
       { "address": "https://dns.cloudflare.com/dns-query" },
@@ -577,7 +578,7 @@ driver_cert_install() {
             grep -q "DEBUG" "$acme_conf" || echo "DEBUG='0'" >> "$acme_conf"
         fi
     else
-        log_err "证书申请失败，请查看日志排查。"
+        log_err "证书申请失败，请查看上方 acme 报错信息。"
     fi
 }
 
@@ -604,12 +605,12 @@ driver_nginx_detect_features() {
     write_file "$tmp_probe" "events {} http { server { listen 127.0.0.1:8443 ssl; ssl_reject_handshake on; } }" 644
     nginx -t -c "$tmp_probe" >/dev/null 2>&1 && has_reject=1
 
-    local listen_dir="listen 127.0.0.1:8443 ssl http2;"
+    local has_http2_directive=0
     write_file "$tmp_probe" "events {} http { server { http2 on; } }" 644
-    nginx -t -c "$tmp_probe" >/dev/null 2>&1 && listen_dir="listen 127.0.0.1:8443 ssl;\n    http2 on;"
+    nginx -t -c "$tmp_probe" >/dev/null 2>&1 && has_http2_directive=1
     rm -f "$tmp_probe"
 
-    echo "$has_reject|$listen_dir"
+    echo "${has_reject}|${has_http2_directive}"
 }
 
 driver_nginx_install() {
@@ -617,23 +618,30 @@ driver_nginx_install() {
     local domains
     domains=$(get_domain_info "$domain")
 
+    # 证书物理文件存在性前置自检
+    if [[ ! -s "/etc/nginx/ssl/${domain}_ecc.cer" || ! -s "/etc/nginx/ssl/${domain}_ecc.key" ]]; then
+        log_err "Nginx 关联的证书文件不存在 (/etc/nginx/ssl/${domain}_ecc.cer)，请检查证书申请步骤。"
+    fi
+
     log_info "正在配置 Nginx 主程序与安全策略..."
     write_file "/etc/nginx/nginx.conf" "$(render_nginx_main_conf)" 644
     rm -f /etc/nginx/sites-enabled/default
 
-    local probe_res has_reject listen_dir
+    local probe_res has_reject has_http2
     probe_res=$(driver_nginx_detect_features)
     has_reject="${probe_res%%|*}"
-    listen_dir="${probe_res#*|}"
+    has_http2="${probe_res#*|}"
 
     local vhost_conf
-    vhost_conf=$(render_nginx_vhost_conf "$domain" "$domains" "$listen_dir" "$has_reject" "${CTX[dns_api]}" "${CTX[mode]}")
+    vhost_conf=$(render_nginx_vhost_conf "$domain" "$domains" "$has_reject" "$has_http2" "${CTX[dns_api]}" "${CTX[mode]}")
     write_file "/etc/nginx/sites-available/xray" "$vhost_conf" 644
     ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/
 
-    if ! nginx -t >/dev/null 2>&1; then
+    local test_err
+    if ! test_err=$(nginx -t 2>&1); then
         rm -f /etc/nginx/sites-enabled/xray
-        log_err "Nginx 配置文件校验失败，请检查配置格式。"
+        echo -e "${C_RED}${test_err}${C_RESET}"
+        log_err "Nginx 配置文件校验失败，具体报错已打印在上方。"
     fi
 
     # 部署伪装网站资源
@@ -771,7 +779,6 @@ driver_hysteria_install() {
     write_file "$HY2_CONFIG" "$(render_hy2_conf)" 600
     chmod 700 "$HY2_CONF_DIR"
 
-    # 生成 Path 证书变动监听服务
     local path_unit="[Unit]
 Description=Watch TLS certificate changes for Hysteria2
 [Path]
@@ -991,6 +998,10 @@ workflow_deploy() {
     cd "$HOME" || safe_terminate 1
     rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
     dpkg --configure -a >/dev/null 2>&1 || true
+
+    # 前置停止旧服务，防止覆盖安装时端口检测自锁冲突
+    systemctl stop xray hysteria-server >/dev/null 2>&1 || true
+    command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1 || true
 
     # 前置依赖自检与补齐，防止交互测试 DNS 时缺少 jq/curl
     if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then

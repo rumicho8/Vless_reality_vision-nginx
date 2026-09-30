@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Xray Reality Automation Engine (Industrial Architecture Edition - V6.3)
+# Xray Reality Automation Engine (Industrial Architecture Edition - V6.4 Final)
 # Architecture: VLESS + XTLS-Vision + Reality + Nginx Reverse Proxy + Hysteria2
 # ==============================================================================
 
@@ -13,7 +13,7 @@ if [[ $EUID -ne 0 ]]; then
     [[ "${BASH_SOURCE[0]}" != "${0}" ]] && return 1 2>/dev/null || exit 1
 fi
 
-readonly SCRIPT_VERSION="6.3-Industrial"
+readonly SCRIPT_VERSION="6.4-Industrial-Final"
 readonly LOG_FILE="/dev/null"
 readonly LOCK_FILE="/var/run/xray_script.lock"
 readonly SCRIPT_DIR="/usr/local/etc/xray-script"
@@ -83,7 +83,7 @@ safe_terminate() {
     [[ "${BASH_SOURCE[0]}" != "${0}" ]] && return "$code" 2>/dev/null || exit "$code"
 }
 
-# 进程并发互斥锁
+# 进程并发互斥锁与信号拦截
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     ACTIVE_PID=$(cat "$LOCK_FILE" 2>/dev/null)
@@ -99,19 +99,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     trap 'cleanup_resources; echo -e "\n${C_YELLOW}用户已手动中断。${C_RESET}"; exit 130' INT
     trap 'cleanup_resources; exit 143' TERM
 fi
-
-write_file() {
-    local path="$1"
-    local content="$2"
-    local mode="${3:-644}"
-    local owner="${4:-root:root}"
-    local dir
-    dir=$(dirname "$path")
-    [[ ! -d "$dir" ]] && mkdir -p "$dir"
-    printf "%s\n" "$content" > "$path"
-    chmod "$mode" "$path"
-    chown "$owner" "$path" 2>/dev/null || true
-}
 
 fetch_asset() {
     local url="$1"
@@ -229,6 +216,7 @@ firewall_purge_nftables() {
 
 sys_setup_journald() {
     log_info "正在配置系统环境和日志策略..."
+    mkdir -p /etc/systemd/journald.conf.d/
     cat > /etc/systemd/journald.conf.d/99-prophet.conf <<'EOF'
 [Journal]
 SystemMaxUse=100M
@@ -306,6 +294,8 @@ driver_cert_install() {
     if [[ "$api" == "webroot" ]]; then
         local acme_temp_conf="/etc/nginx/sites-enabled/acme_temp"
         CLEANUP_LIST+=("$acme_temp_conf")
+        # 清理可能冲突的默认配置
+        rm -f /etc/nginx/sites-enabled/default
         cat > "$acme_temp_conf" <<EOF
 server {
     listen 80;
@@ -321,6 +311,7 @@ EOF
         "$ACME_BIN" --issue --dns "$api" $acme_args --keylength ec-256 ${CTX[cert_mode]}
     fi
 
+    mkdir -p /etc/nginx/ssl
     "$ACME_BIN" --install-cert -d "$primary_domain" --ecc \
         --key-file "/etc/nginx/ssl/${domain}_ecc.key" \
         --fullchain-file "$cert_file" \
@@ -552,6 +543,10 @@ EOF
 EOF
     fi
 
+    # 强制修正权限，根治 umask 导致的 403 Forbidden 隐患
+    chmod -R 755 "$target_dir"
+    chown -R www-data:www-data "$target_dir" 2>/dev/null || true
+
     systemctl enable nginx >/dev/null 2>&1
     systemctl restart nginx || log_err "Nginx 服务重载失败。"
     log_ok "Nginx 伪装网关配置完成。"
@@ -561,7 +556,7 @@ driver_nginx_purge() {
     systemctl stop nginx >/dev/null 2>&1 || true
     systemctl disable nginx >/dev/null 2>&1 || true
     rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
-    rm -rf /var/www/html/* /var/www/html/.[!.]* 2>/dev/null || true
+    rm -rf /var/www/html/* /var/www/html/.[!.]* /etc/nginx/sites-enabled/default 2>/dev/null || true
 }
 
 # --- [Driver: Xray Core 代理引擎] ---
@@ -582,7 +577,6 @@ driver_xray_install() {
     mkdir -p "$XRAY_SHARE_DIR" "$XRAY_CONF_DIR"
     mv -f geoip.dat geosite.dat "$XRAY_SHARE_DIR/" 2>/dev/null || true
 
-    # 原生落盘，彻底杜绝转义与 bad unit file setting 错误
     cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
 Description=Xray Service
@@ -707,7 +701,6 @@ EOF
     chmod 700 "$XRAY_CONF_DIR"
     chmod 600 "$XRAY_CONFIG"
 
-    # 启动前执行核心语法静态测试
     local test_res
     if ! test_res=$("$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>&1); then
         echo -e "${C_RED}=================== XRAY 配置语法测试报错 ===================${C_RESET}"
@@ -1040,7 +1033,6 @@ workflow_deploy() {
     rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
     dpkg --configure -a >/dev/null 2>&1 || true
 
-    # 停止已有服务释放端口，避免占用误判
     systemctl stop xray hysteria-server >/dev/null 2>&1 || true
     command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1 || true
 
@@ -1139,6 +1131,14 @@ workflow_show_result() {
             echo -e " [2] IPv6 节点:\n${C_GREEN}${v6_link}${C_RESET}\n"
             [[ -z "$qr_target" ]] && qr_target="$v6_link"
         fi
+
+        # 修复：IP 获取超时时的兜底回显
+        if [[ -z "${CTX[ipv4]}" && -z "${CTX[ipv6]}" ]]; then
+            local fallback_link="vless://${CTX[uuid]}@你的VPS_IP:${CTX[port]}${query}"
+            echo -e " [!] 默认节点 (获取公网IP超时，请手动替换为实际IP):\n${C_YELLOW}${fallback_link}${C_RESET}\n"
+            qr_target="$fallback_link"
+        fi
+
         [[ -n "$qr_target" ]] && echo "$qr_target" | qrencode -t ansiutf8
     fi
 
@@ -1158,16 +1158,26 @@ workflow_uninstall() {
     detect_firewall_backend
     echo -e "\n${C_BLUE}[INFO]${C_RESET} 正在回收防火墙端口与系统服务..."
 
-    local cur_port=""
+    local cur_port="" dest_val=""
     if [[ -f "$XRAY_CONFIG" ]]; then
         cur_port=$(jq -r '.inbounds[0].port' "$XRAY_CONFIG" 2>/dev/null)
+        dest_val=$(jq -r '.inbounds[0].streamSettings.realitySettings.dest' "$XRAY_CONFIG" 2>/dev/null)
+    fi
+
+    local had_nginx=0
+    if [[ "$dest_val" == *"127.0.0.1"* ]] || \
+       [[ -f /etc/nginx/sites-available/xray ]] || \
+       [[ -d /etc/nginx/ssl && -n "$(ls -A /etc/nginx/ssl 2>/dev/null)" ]] || \
+       [[ -f /etc/hysteria/config.yaml ]]; then
+        had_nginx=1
     fi
 
     if [[ -n "$cur_port" && "$cur_port" =~ ^[0-9]+$ ]]; then
         firewall_rule "deny" "$cur_port" "tcp"
         firewall_rule "deny" "$cur_port" "udp"
     fi
-    firewall_rule "deny" 80 "tcp"
+    # 修复：仅在确实部署过 Web/伪装站点时回收 80 端口，保护用户宿主机原有业务
+    [[ $had_nginx -eq 1 ]] && firewall_rule "deny" 80 "tcp"
     firewall_purge_nftables
 
     driver_xray_purge
@@ -1184,6 +1194,7 @@ workflow_uninstall() {
         [yY][eE][sS]|[yY])
             local purge_list="nginx nginx-common socat qrencode jq unzip"
             apt-get purge -yqq $purge_list >/dev/null 2>&1
+            rm -rf /etc/nginx
             sys_clean_apt_cache
             echo -e "${C_GREEN}[OK] 底层运行依赖包已彻底清除 (已保留 curl、BBR 与日志策略)。${C_RESET}"
             ;;

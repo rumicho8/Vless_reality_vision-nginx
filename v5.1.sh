@@ -114,7 +114,7 @@ get_domain_info() {
         if getent ahostsv4 "$root_d" >/dev/null 2>&1 || getent ahostsv6 "$root_d" >/dev/null 2>&1; then
             echo "$root_d $domain" && return
         fi
-    elif [ "$dot_count" -eq 1 ]; then
+    elif [[ "$dot_count" -eq 1 ]]; then
         local www_d="www.$domain"
         if getent ahostsv4 "$www_d" >/dev/null 2>&1 || getent ahostsv6 "$www_d" >/dev/null 2>&1; then
             echo "$domain $www_d" && return
@@ -283,7 +283,9 @@ driver_cert_install() {
     local primary_domain
     primary_domain=$(echo "$domains" | awk '{print $1}')
     local acme_args=""
-    for d in $domains; do acme_args="$acme_args -d $d"; done
+    for d in $domains; do
+        acme_args="$acme_args -d $d"
+    done
 
     if [[ -s "$cert_file" ]]; then
         log_info "检测到服务器已存在有效证书，跳过申请步骤直接复用。"
@@ -397,24 +399,28 @@ worker_processes auto;
 pid /run/nginx.pid;
 error_log /var/log/nginx/error.log notice;
 include /etc/nginx/modules-enabled/*.conf;
-events { worker_connections 1024; }
+
+events {
+    worker_connections 1024;
+}
+
 http {
-  sendfile on;
-  tcp_nopush on;
-  types_hash_max_size 2048;
-  server_tokens off;
-  include /etc/nginx/mime.types;
-  default_type application/octet-stream;
-  ssl_protocols TLSv1.2 TLSv1.3;
-  ssl_prefer_server_ciphers on;
-  ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
-  ssl_session_cache shared:SSL:10m;
-  ssl_session_timeout 10m;
-  ssl_session_tickets off;
-  access_log off;
-  gzip on;
-  include /etc/nginx/conf.d/*.conf;
-  include /etc/nginx/sites-enabled/*;
+    sendfile on;
+    tcp_nopush on;
+    types_hash_max_size 2048;
+    server_tokens off;
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    ssl_session_tickets off;
+    access_log off;
+    gzip on;
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
 }
 EOF
     rm -f /etc/nginx/sites-enabled/default
@@ -448,15 +454,16 @@ server {
 EOF
     fi
 
-    local listen_directive="listen 127.0.0.1:8443 ssl http2;"
+    local listen_directive
     if [[ $has_http2 -eq 1 ]]; then
-        listen_directive="listen 127.0.0.1:8443 ssl;
-    http2 on;"
+        listen_directive="listen 127.0.0.1:8443 ssl;\n    http2 on;"
+    else
+        listen_directive="listen 127.0.0.1:8443 ssl http2;"
     fi
 
     cat >> "$tmp_conf" <<EOF
 server {
-    ${listen_directive}
+    $(echo -e "$listen_directive")
     ssl_certificate /etc/nginx/ssl/${domain}_ecc.cer;
     ssl_certificate_key /etc/nginx/ssl/${domain}_ecc.key;
     server_name $domains;
@@ -648,13 +655,16 @@ driver_xray_configure() {
     if [[ -z "${CTX[priv_key]}" || "${CTX[priv_key]}" == "null" || -z "${CTX[pub_key]}" || "${CTX[pub_key]}" == "null" ]]; then
         local key_re="$($XRAY_BIN x25519 | tr -d '\r')"
         mapfile -t KEYS < <(echo "$key_re" | grep -iE "Private|Public|Password" | grep -oE '[A-Za-z0-9_-]{43}')
-        CTX[priv_key]=""; CTX[pub_key]=""
+        CTX[priv_key]=""
+        CTX[pub_key]=""
         for p_priv in "${KEYS[@]}"; do
             local calc_pub
             calc_pub=$($XRAY_BIN x25519 -i "$p_priv" 2>/dev/null | grep -iE "Public|Password" | grep -oE '[A-Za-z0-9_-]{43}' | head -n1)
             for p_pub in "${KEYS[@]}"; do
                 if [[ "$calc_pub" == "$p_pub" && "$p_priv" != "$p_pub" ]]; then
-                    CTX[priv_key]="$p_priv"; CTX[pub_key]="$p_pub"; break 2
+                    CTX[priv_key]="$p_priv"
+                    CTX[pub_key]="$p_pub"
+                    break 2
                 fi
             done
         done
@@ -678,7 +688,9 @@ driver_xray_configure() {
 
     cat > "$XRAY_CONFIG" <<EOF
 {
-  "log": { "loglevel": "warning" },
+  "log": {
+    "loglevel": "warning"
+  },
   "dns": {
     "queryStrategy": "UseIP",
     "disableFallback": false,
@@ -697,29 +709,53 @@ driver_xray_configure() {
       "https://dns.google/dns-query"
     ]
   },
-  "inbounds": [{
-    "listen": "::",
-    "port": $port,
-    "protocol": "vless",
-    "settings": { "clients": [ { "id": "$uuid", "flow": "xtls-rprx-vision" } ], "decryption": "none" },
-    "sniffing": { "enabled": true, "destOverride": ["http", "tls"], "routeOnly": true },
-    "streamSettings": {
-      "network": "tcp",
-      "security": "reality",
-      "realitySettings": {
-        "show": false,
-        "dest": "$dest_addr",
-        "xver": 0,
-        "serverNames": $server_names_json,
-        "privateKey": "$priv",
-        "shortIds": ["$sid"]
+  "inbounds": [
+    {
+      "listen": "::",
+      "port": $port,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "$dest_addr",
+          "xver": 0,
+          "serverNames": $server_names_json,
+          "privateKey": "$priv",
+          "shortIds": [
+            "$sid"
+          ]
+        }
       }
     }
-  }],
+  ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct", "settings": { "domainStrategy": "UseIP" }
+    {
+      "protocol": "freedom",
+      "tag": "direct",
+      "settings": {
+        "domainStrategy": "UseIP"
+      }
     },
-    { "protocol": "blackhole", "tag": "block" }
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
   ],
   "routing": {
     "domainStrategy": "IPIfNonMatch",
@@ -806,6 +842,7 @@ PathChanged=/etc/nginx/ssl/${domain}_ecc.key
 WantedBy=multi-user.target
 EOF
 
+    mkdir -p "$SCRIPT_DIR"
     cat > "$SCRIPT_DIR/hysteria-cert-restart.sh" <<EOF
 #!/bin/bash
 cert_file="/etc/nginx/ssl/${domain}_ecc.cer"
@@ -876,6 +913,7 @@ driver_hysteria_purge() {
 # --- [Driver: 路由分流规则自动化更新] ---
 driver_rules_dat_setup() {
     log_info "正在配置路由规则库自动更新任务..."
+    mkdir -p "$SCRIPT_DIR"
     cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
 #!/bin/bash
 exec 9> /var/lock/xray-dat.lock
@@ -889,7 +927,7 @@ update_file() {
     if curl -fL --max-time 300 --connect-timeout 60 --retry 5 --retry-delay 3 --retry-connrefused -o "$target_tmp" "$u" && [[ -s "$target_tmp" ]]; then
         local f_size
         f_size=$(stat -c%s "$target_tmp" 2>/dev/null || wc -c < "$target_tmp" 2>/dev/null | tr -d ' ' || echo 0)
-        if [ "$f_size" -ge 512000 ] && ! cmp -s "$target_tmp" "$SHARE_DIR/$f"; then
+        if [[ "$f_size" -ge 512000 ]] && ! cmp -s "$target_tmp" "$SHARE_DIR/$f"; then
             mv -f "$target_tmp" "$SHARE_DIR/$f"
             changed=1
             return 0
@@ -953,7 +991,7 @@ workflow_select_port() {
     while true; do
         read -rp "请设置 Xray 监听端口 (范围 1-65535) [默认 443]: " PORT_INPUT
         CTX[port]=${PORT_INPUT:-443}
-        if ! [[ "${CTX[port]}" =~ ^[0-9]+$ ]] || [ "${CTX[port]}" -lt 1 ] || [ "${CTX[port]}" -gt 65535 ]; then
+        if ! [[ "${CTX[port]}" =~ ^[0-9]+$ ]] || [[ "${CTX[port]}" -lt 1 ]] || [[ "${CTX[port]}" -gt 65535 ]]; then
             log_warn "输入的端口无效，请输入 1-65535 之间的数字。"
             continue
         fi
@@ -1084,9 +1122,9 @@ workflow_deploy() {
     local arch_raw
     arch_raw=$(dpkg --print-architecture 2>/dev/null || uname -m)
     case "$arch_raw" in
-        amd64|x86_64) CTX[arch]="amd64" ;;
+        amd64|x86_64)  CTX[arch]="amd64" ;;
         arm64|aarch64) CTX[arch]="arm64" ;;
-        *) CTX[arch]="amd64" ;;
+        *)             CTX[arch]="amd64" ;;
     esac
 
     detect_firewall_backend
@@ -1275,7 +1313,9 @@ while true; do
             safe_terminate 0
             break
             ;;
-        2) workflow_uninstall ;;
+        2)
+            workflow_uninstall
+            ;;
         3)
             echo -e "\n${C_BOLD}${C_BLUE}--- 自动任务运行状态 ---${C_RESET}"
             systemctl list-timers --all | grep -E "xray-acme|xray-dat" || echo "当前没有运行中的定时任务"

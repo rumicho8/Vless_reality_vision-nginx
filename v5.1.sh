@@ -682,11 +682,19 @@ driver_xray_configure() {
   "dns": {
     "queryStrategy": "UseIP",
     "disableFallback": false,
+    "hosts": {
+      "dns.cloudflare.com": [
+        "1.1.1.1",
+        "1.0.0.1"
+      ],
+      "dns.google": [
+        "8.8.8.8",
+        "8.8.4.4"
+      ]
+    },
     "servers": [
-      "1.1.1.1",
-      "1.0.0.1",
-      "8.8.8.8",
-      "8.8.4.4"
+      "https://dns.cloudflare.com/dns-query",
+      "https://dns.google/dns-query"
     ]
   },
   "inbounds": [{
@@ -709,7 +717,8 @@ driver_xray_configure() {
     }
   }],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "freedom", "tag": "direct", "settings": { "domainStrategy": "UseIP" }
+    },
     { "protocol": "blackhole", "tag": "block" }
   ],
   "routing": {

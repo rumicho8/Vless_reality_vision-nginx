@@ -681,14 +681,12 @@ driver_xray_configure() {
   "log": { "loglevel": "warning" },
   "dns": {
     "queryStrategy": "UseIP",
-    "disableFallback": true,
-    "hosts": {
-      "dns.google": ["2001:4860:4860::8888", "2001:4860:4860::8844", "8.8.8.8", "8.8.4.4"],
-      "dns.cloudflare.com": ["2606:4700:4700::1111", "2606:4700:4700::1001", "1.1.1.1", "1.0.0.1"]
-    },
+    "disableFallback": false,
     "servers": [
-      { "address": "https://dns.cloudflare.com/dns-query" },
-      { "address": "https://dns.google/dns-query", "skipFallback": true }
+      "1.1.1.1",
+      "1.0.0.1",
+      "8.8.8.8",
+      "8.8.4.4"
     ]
   },
   "inbounds": [{

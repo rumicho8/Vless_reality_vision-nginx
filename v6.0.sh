@@ -1045,11 +1045,11 @@ workflow_deploy() {
     systemctl stop xray hysteria-server >/dev/null 2>&1 || true
     command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1 || true
 
+    # 预检必要解析与网络工具，配合可视化输出消除盲等感
     if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-        apt-get install -yqq --no-install-recommends curl jq >/dev/null 2>&1 || {
-            apt-get update -yqq >/dev/null 2>&1
-            apt-get install -yqq --no-install-recommends curl jq >/dev/null 2>&1
-        }
+        log_info "正在初始化预检环境并同步基础软件源，请稍候..."
+        apt-get update -yqq >/dev/null 2>&1
+        apt-get install -yqq --no-install-recommends curl jq >/dev/null 2>&1
     fi
 
     local arch_raw
@@ -1072,7 +1072,7 @@ workflow_deploy() {
     local apt_log="/tmp/apt_install_$$.log"
     CLEANUP_LIST+=("$apt_log")
 
-    # 针对 Ubuntu 环境自动确保 universe 软件源处于激活状态（qrencode / socat 所在源）
+    # 针对 Ubuntu 环境自动确保 universe 软件源处于激活状态（解决 qrencode / socat 依赖源缺失）
     if [[ -f /etc/os-release ]] && grep -qi "ubuntu" /etc/os-release; then
         local need_refresh=0
         if command -v add-apt-repository >/dev/null 2>&1; then
@@ -1090,7 +1090,7 @@ workflow_deploy() {
         [[ $need_refresh -eq 1 ]] && apt-get update -yqq >/dev/null 2>&1
     fi
 
-    # 执行基础包安装，如果因源缓存缺失报错则自动刷新索引重试
+    # 执行基础包安装，如果因源缓存或并发锁偶发未命中则自动拉取一次 update 静默重试
     if ! apt-get install -yqq --no-install-recommends \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" \

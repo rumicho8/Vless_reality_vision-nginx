@@ -915,8 +915,26 @@ driver_rules_dat_purge() {
 # LAYER 4: 业务交互与流程编排 (Workflow Orchestration & Prompts)
 # ------------------------------------------------------------------------------
 workflow_fetch_host_ips() {
-    CTX[ipv4]=$(curl -s4m 5 icanhazip.com || curl -s4m 5 ifconfig.me || true)
-    CTX[ipv6]=$(curl -s6m 5 icanhazip.com || curl -s6m 5 ifconfig.me || true)
+    local tmp_v4="/tmp/ip_v4_$$"
+    local tmp_v6="/tmp/ip_v6_$$"
+
+    # 后台并发执行 IPv4 探测，严格设置 2 秒连接与操作超时
+    (curl -s4m 2 --connect-timeout 2 icanhazip.com || curl -s4m 2 --connect-timeout 2 api.ipify.org || true) > "$tmp_v4" 2>/dev/null &
+    local pid_v4=$!
+
+    # 协议栈前置自检：只有当内核存在公网 IPv6 且配有默认路由时才探测，否则 0 毫秒跳过
+    local pid_v6=""
+    if ip -6 addr show scope global 2>/dev/null | grep -q "inet6" && ip -6 route show default 2>/dev/null | grep -q default; then
+        (curl -s6m 2 --connect-timeout 2 icanhazip.com || curl -s6m 2 --connect-timeout 2 api64.ipify.org || true) > "$tmp_v6" 2>/dev/null &
+        pid_v6=$!
+    fi
+
+    wait "$pid_v4" 2>/dev/null
+    [[ -n "$pid_v6" ]] && wait "$pid_v6" 2>/dev/null
+
+    CTX[ipv4]=$(tr -d '[:space:]\r\n' < "$tmp_v4" 2>/dev/null)
+    CTX[ipv6]=$(tr -d '[:space:]\r\n' < "$tmp_v6" 2>/dev/null)
+    rm -f "$tmp_v4" "$tmp_v6" 2>/dev/null
 }
 
 workflow_select_port() {

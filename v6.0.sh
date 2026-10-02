@@ -1072,22 +1072,49 @@ workflow_deploy() {
     local apt_log="/tmp/apt_install_$$.log"
     CLEANUP_LIST+=("$apt_log")
 
+    # 针对 Ubuntu 环境自动确保 universe 软件源处于激活状态（qrencode / socat 所在源）
+    if [[ -f /etc/os-release ]] && grep -qi "ubuntu" /etc/os-release; then
+        local need_refresh=0
+        if command -v add-apt-repository >/dev/null 2>&1; then
+            if ! grep -qE "^deb .*universe" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+                add-apt-repository -y universe >/dev/null 2>&1
+                need_refresh=1
+            fi
+        else
+            if ! grep -qE "(universe|Components:.*universe)" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+                sed -i '/^deb .* main/ { /universe/! s/$/ universe/ }' /etc/apt/sources.list 2>/dev/null || true
+                sed -i '/^Components:/ { /universe/! s/$/ universe/ }' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+                need_refresh=1
+            fi
+        fi
+        [[ $need_refresh -eq 1 ]] && apt-get update -yqq >/dev/null 2>&1
+    fi
+
+    # 执行基础包安装，如果因源缓存缺失报错则自动刷新索引重试
     if ! apt-get install -yqq --no-install-recommends \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" \
         $install_pkgs > "$apt_log" 2>&1; then
 
+        log_warn "基础包初次匹配未通过，正在同步软件源并重试..."
+        apt-get update -yqq >/dev/null 2>&1
+        apt-get install -yqq --no-install-recommends \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
+            $install_pkgs > "$apt_log" 2>&1
+    fi
+
+    local missing_pkgs=()
+    for pkg in $install_pkgs; do
+        if ! dpkg -s "$pkg" >/dev/null 2>&1 || ! dpkg -s "$pkg" | grep -qw "Status: install ok installed"; then
+            missing_pkgs+=("$pkg")
+        fi
+    done
+
+    if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
         echo -e "${C_RED}=================== APT 安装底层报错详情 ===================${C_RESET}"
         grep -iE "E:|Err:|Error|dpkg:|failed" "$apt_log" 2>/dev/null || tail -n 15 "$apt_log"
         echo -e "${C_RED}============================================================${C_RESET}"
-
-        local missing_pkgs=()
-        for pkg in $install_pkgs; do
-            if ! dpkg -s "$pkg" >/dev/null 2>&1 || ! dpkg -s "$pkg" | grep -qw "Status: install ok installed"; then
-                missing_pkgs+=("$pkg")
-            fi
-        done
-
         rm -f "$apt_log"
         log_err "基础软件安装未通过！未就绪的依赖组件: [ ${missing_pkgs[*]} ]，请根据上方红框内的错误原因修复系统环境。"
     fi
